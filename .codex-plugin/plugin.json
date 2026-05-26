@@ -17,7 +17,6 @@
     "backend",
     "typescript"
   ],
-  "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Convex MCP",
@@ -34,10 +33,13 @@
     "websiteURL": "https://mcp.convex.dev",
     "privacyPolicyURL": "https://mcp.convex.dev/privacy",
     "defaultPrompt": [
-      "Start a new Convex app for my project.",
-      "Fetch the Convex quickstart runbook.",
-      "Wire Convex into my React app."
+      "Start a new Convex app.",
+      "Add Convex to this project.",
+      "Review my Convex scaling plan."
     ],
-    "brandColor": "#EE342F"
+    "brandColor": "#EE342F",
+    "termsOfServiceURL": "https://www.convex.dev/legal/tos",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png"
   }
 }
