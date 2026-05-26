@@ -1,0 +1,43 @@
+{
+  "name": "convex-mcp",
+  "version": "0.1.0",
+  "description": "Convex MCP server for starting and wiring Convex apps from Codex.",
+  "author": {
+    "name": "Convex, Inc.",
+    "email": "support@convex.dev",
+    "url": "https://www.convex.dev"
+  },
+  "homepage": "https://mcp.convex.dev",
+  "repository": "https://github.com/get-convex/convex-mcp-plugin",
+  "license": "UNLICENSED",
+  "keywords": [
+    "convex",
+    "mcp",
+    "apps-sdk",
+    "backend",
+    "typescript"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Convex MCP",
+    "shortDescription": "Add Convex to JS and TS apps.",
+    "longDescription": "Use the hosted Convex MCP server from Codex to fetch the Convex quickstart runbook, start new Convex apps, generate backend and client wiring snippets, plan migrations from common backends, and add Convex Agent chat wiring.",
+    "developerName": "Convex, Inc.",
+    "category": "Developer Tools",
+    "capabilities": [
+      "MCP",
+      "Code generation",
+      "Backend setup",
+      "Migration guidance"
+    ],
+    "websiteURL": "https://mcp.convex.dev",
+    "privacyPolicyURL": "https://mcp.convex.dev/privacy",
+    "defaultPrompt": [
+      "Start a new Convex app for my project.",
+      "Fetch the Convex quickstart runbook.",
+      "Wire Convex into my React app."
+    ],
+    "brandColor": "#EE342F"
+  }
+}
