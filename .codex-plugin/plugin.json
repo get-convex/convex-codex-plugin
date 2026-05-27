@@ -1,13 +1,13 @@
 {
   "name": "convex-mcp",
   "version": "0.1.0",
-  "description": "Convex MCP server for starting and wiring Convex apps from Codex.",
+  "description": "Convex ChatGPT app for building and scaling Convex apps from Codex.",
   "author": {
     "name": "Convex, Inc.",
     "email": "support@convex.dev",
     "url": "https://www.convex.dev"
   },
-  "homepage": "https://mcp.convex.dev",
+  "homepage": "https://chatgpt.com/apps/convex/asdk_app_6a0faef988b48191b843bac5cd170a9e",
   "repository": "https://github.com/get-convex/convex-mcp-plugin",
   "license": "UNLICENSED",
   "keywords": [
@@ -17,11 +17,10 @@
     "backend",
     "typescript"
   ],
-  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Convex MCP",
     "shortDescription": "Add Convex to JS and TS apps.",
-    "longDescription": "Use the hosted Convex MCP server from Codex to fetch the Convex quickstart runbook, start new Convex apps, generate backend and client wiring snippets, plan migrations from common backends, and add Convex Agent chat wiring.",
+    "longDescription": "Use the reviewed Convex ChatGPT app from Codex to start new Convex apps, add Convex to existing JavaScript and TypeScript projects, and get scaling guidance for production Convex architecture.",
     "developerName": "Convex, Inc.",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,7 +29,7 @@
       "Backend setup",
       "Migration guidance"
     ],
-    "websiteURL": "https://mcp.convex.dev",
+    "websiteURL": "https://chatgpt.com/apps/convex/asdk_app_6a0faef988b48191b843bac5cd170a9e",
     "privacyPolicyURL": "https://mcp.convex.dev/privacy",
     "defaultPrompt": [
       "Start a new Convex app.",
@@ -41,5 +40,6 @@
     "termsOfServiceURL": "https://www.convex.dev/legal/tos",
     "composerIcon": "./assets/icon.png",
     "logo": "./assets/logo.png"
-  }
+  },
+  "apps": "./.app.json"
 }

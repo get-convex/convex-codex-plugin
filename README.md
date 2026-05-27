@@ -1,19 +1,22 @@
 # Convex MCP Codex Plugin
 
-A Codex plugin that installs the hosted Convex MCP server.
+A Codex plugin that installs the reviewed Convex ChatGPT app.
 
-## MCP server
+## ChatGPT app
 
-This plugin points Codex at:
+This plugin points Codex at the reviewed Convex app snapshot:
 
 ```text
-https://mcp.convex.dev/mcp
+asdk_app_6a0faef988b48191b843bac5cd170a9e
 ```
 
-The server exposes tools for starting Convex apps, fetching the Convex quickstart runbook, generating backend and client wiring snippets, planning migrations, and adding Convex Agent wiring.
+App URL: https://chatgpt.com/apps/convex/asdk_app_6a0faef988b48191b843bac5cd170a9e
+
+The app exposes tools for starting Convex apps, adding Convex to existing JavaScript and TypeScript projects, and getting Convex scaling guidance.
 
 ## Plugin contents
 
 - `.codex-plugin/plugin.json` - Codex plugin metadata
-- `.mcp.json` - MCP server configuration
+- `.app.json` - ChatGPT app reference
+- `assets/` - Convex brand assets
 
