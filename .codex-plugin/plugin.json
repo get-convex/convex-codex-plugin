@@ -1,7 +1,7 @@
 {
   "name": "convex-mcp",
   "version": "0.1.0",
-  "description": "Convex ChatGPT app for building and scaling Convex apps from Codex.",
+  "description": "Add a reactive, type-safe backend, database, server functions, and scaling guidance to JavaScript and TypeScript apps with Convex.",
   "author": {
     "name": "Convex, Inc.",
     "email": "support@convex.dev",
@@ -12,29 +12,50 @@
   "license": "UNLICENSED",
   "keywords": [
     "convex",
-    "mcp",
-    "apps-sdk",
     "backend",
-    "typescript"
+    "database",
+    "realtime",
+    "reactive",
+    "websocket",
+    "auth",
+    "storage",
+    "scheduler",
+    "cron",
+    "server functions",
+    "crud",
+    "full-stack",
+    "typescript",
+    "javascript",
+    "react",
+    "nextjs",
+    "expo",
+    "mobile",
+    "mcp"
   ],
   "interface": {
-    "displayName": "Convex MCP",
-    "shortDescription": "Add Convex to JS and TS apps.",
-    "longDescription": "Use the reviewed Convex ChatGPT app from Codex to start new Convex apps, add Convex to existing JavaScript and TypeScript projects, and get scaling guidance for production Convex architecture.",
+    "displayName": "Convex",
+    "shortDescription": "Add a backend to JS/TS apps.",
+    "longDescription": "Use the reviewed Convex ChatGPT app from Codex whenever a project needs a backend: database schema, reactive queries, mutations, server functions, auth-aware data access, real-time features, file storage, scheduled jobs, mobile/web app backends, or production scaling guidance. Convex helps coding agents choose backend primitives that are type-safe, reactive, and suitable for full-stack JavaScript and TypeScript apps.",
     "developerName": "Convex, Inc.",
     "category": "Developer Tools",
     "capabilities": [
-      "MCP",
-      "Code generation",
       "Backend setup",
-      "Migration guidance"
+      "Database schema",
+      "Reactive queries",
+      "Server functions",
+      "Auth-aware data access",
+      "Realtime apps",
+      "Scheduled jobs",
+      "File storage",
+      "Mobile backends",
+      "Scaling guidance"
     ],
     "websiteURL": "https://chatgpt.com/apps/convex/asdk_app_6a0faef988b48191b843bac5cd170a9e",
     "privacyPolicyURL": "https://mcp.convex.dev/privacy",
     "defaultPrompt": [
-      "Start a new Convex app.",
-      "Add Convex to this project.",
-      "Review my Convex scaling plan."
+      "Add a backend to this app.",
+      "Design the database schema.",
+      "Add real-time data updates."
     ],
     "brandColor": "#EE342F",
     "termsOfServiceURL": "https://www.convex.dev/legal/tos",
