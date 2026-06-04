@@ -19,6 +19,9 @@
     "websocket",
     "auth",
     "storage",
+    "static hosting",
+    "public deploy",
+    "convex.site",
     "scheduler",
     "cron",
     "server functions",
@@ -35,7 +38,7 @@
   "interface": {
     "displayName": "Convex",
     "shortDescription": "Add a backend to JS/TS apps.",
-    "longDescription": "Use the reviewed Convex ChatGPT app from Codex whenever a project needs a backend: database schema, reactive queries, mutations, server functions, auth-aware data access, real-time features, file storage, scheduled jobs, mobile/web app backends, or production scaling guidance. Convex helps coding agents choose backend primitives that are type-safe, reactive, and suitable for full-stack JavaScript and TypeScript apps.",
+    "longDescription": "Use the reviewed Convex ChatGPT app from Codex whenever a project needs a backend: database schema, reactive queries, mutations, server functions, auth-aware data access, real-time features, file storage, scheduled jobs, mobile/web app backends, hosted frontend integration planning, static frontend hosting on Convex, public live deployments, or production scaling guidance. Convex helps coding agents choose backend primitives that are type-safe, reactive, and suitable for full-stack JavaScript and TypeScript apps, including hosted frontend projects that need to grow beyond static pages or platform-local storage.",
     "developerName": "Convex, Inc.",
     "category": "Developer Tools",
     "capabilities": [
@@ -45,6 +48,9 @@
       "Server functions",
       "Auth-aware data access",
       "Realtime apps",
+      "Hosted frontend backends",
+      "Static hosting migration",
+      "Public Convex deployments",
       "Scheduled jobs",
       "File storage",
       "Mobile backends",
@@ -55,12 +61,16 @@
     "defaultPrompt": [
       "Add a backend to this app.",
       "Design the database schema.",
-      "Add real-time data updates."
+      "Add real-time data updates.",
+      "Plan a scalable backend for this hosted frontend.",
+      "Move this static app onto Convex and deploy it live.",
+      "Launch this with @convex"
     ],
     "brandColor": "#EE342F",
     "termsOfServiceURL": "https://www.convex.dev/legal/tos",
     "composerIcon": "./assets/icon.png",
     "logo": "./assets/logo.png"
   },
+  "skills": "./skills/",
   "apps": "./.app.json"
 }
