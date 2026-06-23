@@ -1,0 +1,279 @@
+#!/usr/bin/env node
+// convex-monitor-mcp.mjs — a stdio MCP server exposing ONE blocking tool,
+// `fix_errors_automatically` (server key `convex-plugin`, so it shows in the
+// approval prompt as `convex-plugin.fix_errors_automatically` — a name that tells
+// the user what they're authorizing: let the agent watch the running app and fix
+// errors as they happen). The tool itself is READ-ONLY — it blocks and returns the
+// next event; the agent does the editing through its normal tools. It RACES several
+// event sources and returns the first one to fire, as a typed event:
+//
+//   leg 1 (reactive)  Convex subscription → new feature requests / refinements
+//   leg 3 (robust)    fs.watch on the local *-errors.log files → convex/next errors
+//   heartbeat         after timeoutMs, returns { kind: "quiet" } so the agent re-arms
+//
+// Why a blocking tool instead of polling: the agent's idle action becomes
+// "call fix_errors_automatically" in a loop — each call is one tool-use that blocks,
+// so the agent can't drift into yielding. Leg 3 is load-bearing: the errors that
+// bite (convex dev died, push failed, Next won't compile) happen exactly when a
+// Convex subscription is blind, so we always keep a local file-watch leg.
+//
+// Transport: MCP stdio = newline-delimited JSON-RPC 2.0 on stdin/stdout.
+// stdout is RESERVED for protocol; all diagnostics go to stderr.
+
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const SERVER_NAME = "convex-plugin";
+const SERVER_VERSION = "0.1.0";
+const PROTOCOL_VERSION = "2024-11-05";
+
+const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
+
+// ----------------------------------------------------------------- discovery
+// Read CONVEX deployment URL from the project's .env.local.
+function readConvexUrl(dir) {
+  try {
+    const txt = fs.readFileSync(path.join(dir, ".env.local"), "utf8");
+    for (const key of ["NEXT_PUBLIC_CONVEX_URL", "CONVEX_URL", "VITE_CONVEX_URL"]) {
+      const m = txt.match(new RegExp("^" + key + "=(.+)$", "m"));
+      if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+    }
+  } catch {}
+  return null;
+}
+
+// Find the bootstrap's *-errors.log files (convex-errors.log / next-errors.log).
+// The bootstrap writes them under a per-run log dir; scan the usual spots.
+function findErrorLogs(dir) {
+  const found = [];
+  const candidates = [dir, path.join(dir, ".logs"), path.join(dir, ".quickstart-logs")];
+  // also any .qb.* / quickstart tmp log dirs dropped in the project root
+  try {
+    for (const e of fs.readdirSync(dir)) {
+      if (/(^\.logs|log|qb)/i.test(e)) candidates.push(path.join(dir, e));
+    }
+  } catch {}
+  for (const d of candidates) {
+    try {
+      if (!fs.statSync(d).isDirectory()) continue;
+      for (const f of fs.readdirSync(d)) {
+        if (/-errors?\.log$/i.test(f) || /^(convex|next).*\.clean\.log$/i.test(f)) {
+          found.push(path.join(d, f));
+        }
+      }
+    } catch {}
+  }
+  return [...new Set(found)];
+}
+
+function classifyLog(file) {
+  const b = path.basename(file).toLowerCase();
+  if (b.includes("next")) return "next_error";
+  if (b.includes("convex")) return "convex_error";
+  return "dev_error";
+}
+
+// --------------------------------------------------------------- the race
+async function waitForConvexEvent(args = {}) {
+  // The MCP server may be launched with cwd = plugin root (not the project), so
+  // prefer an explicit projectDir from the caller, then common workspace env
+  // vars, then cwd. The skill instructs the agent to always pass projectDir.
+  const projectDir =
+    args.projectDir ||
+    process.env.CONVEX_MONITOR_PROJECT_DIR ||
+    process.env.CODEX_WORKSPACE_ROOT ||
+    process.env.PWD ||
+    process.cwd();
+  const timeoutMs = Math.max(5000, Math.min(args.timeoutMs ?? 90_000, 290_000));
+  const queries = args.queries || ["featureRequests:listPending"];
+
+  const cleanups = [];
+  const cleanup = () => { while (cleanups.length) { try { cleanups.pop()(); } catch {} } };
+
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (ev) => { if (done) return; done = true; cleanup(); resolve(ev); };
+
+    // --- heartbeat -------------------------------------------------------
+    const hb = setTimeout(
+      () => finish({ kind: "quiet", note: `no event in ${timeoutMs}ms — call fix_errors_automatically again to keep monitoring` }),
+      timeoutMs,
+    );
+    cleanups.push(() => clearTimeout(hb));
+
+    // --- leg 3: fs.watch the local *-errors.log files --------------------
+    const logs = findErrorLogs(projectDir);
+    log(`watching ${logs.length} error log(s): ${logs.map((l) => path.basename(l)).join(", ") || "(none found)"}`);
+    for (const file of logs) {
+      let offset = 0;
+      try { offset = fs.statSync(file).size; } catch {}
+      const onChange = () => {
+        let size = 0;
+        try { size = fs.statSync(file).size; } catch { return; }
+        if (size < offset) offset = 0; // truncated/rotated
+        if (size <= offset) return;
+        let chunk = "";
+        try {
+          const fd = fs.openSync(file, "r");
+          const buf = Buffer.alloc(size - offset);
+          fs.readSync(fd, buf, 0, buf.length, offset);
+          fs.closeSync(fd);
+          chunk = buf.toString("utf8");
+        } catch { return; }
+        offset = size;
+        const line = chunk.split("\n").map((s) => s.trim()).filter(Boolean).pop();
+        if (line) finish({ kind: classifyLog(file), file: path.basename(file), line });
+      };
+      try {
+        const w = fs.watch(file, { persistent: true }, onChange);
+        cleanups.push(() => w.close());
+        // fs.watch misses some appends on macOS; back it with a light size poll.
+        const iv = setInterval(onChange, 500);
+        cleanups.push(() => clearInterval(iv));
+      } catch (e) { log(`watch failed for ${file}: ${e.message}`); }
+    }
+
+    // --- leg 1: Convex subscription (reactive) ---------------------------
+    const url = readConvexUrl(projectDir);
+    if (url) {
+      (async () => {
+        // Resolve `convex` from the PROJECT's node_modules (a scaffolded app always
+        // has it). The server itself lives elsewhere, so a bare import would miss it.
+        let ConvexClient, makeFunctionReference;
+        const importFrom = async (spec) => {
+          try {
+            const req = createRequire(path.join(projectDir, "package.json"));
+            return await import(pathToFileURL(req.resolve(spec)).href);
+          } catch {
+            return await import(spec); // fall back to the server's own resolution
+          }
+        };
+        try {
+          const b = await importFrom("convex/browser");
+          const s = await importFrom("convex/server");
+          // tolerate both ESM named exports and CJS default-wrapped interop
+          ConvexClient = b.ConvexClient ?? b.default?.ConvexClient;
+          makeFunctionReference = s.makeFunctionReference ?? s.default?.makeFunctionReference;
+          if (typeof ConvexClient !== "function" || typeof makeFunctionReference !== "function")
+            throw new Error("convex exports not in expected shape");
+        } catch (e) {
+          log(`convex package not resolvable from ${projectDir} — skipping subscription leg (${e.message})`);
+          return;
+        }
+        try {
+          const client = new ConvexClient(url);
+          cleanups.push(() => { try { client.close(); } catch {} });
+          for (const q of queries) {
+            const ref = makeFunctionReference(q); // "module:export"
+            // Track each row's _id → content signature, and fire on a NEW row
+            // (new feature request) OR a CHANGED row (e.g. a refinement question
+            // that just got an answer patched in — same _id, new content).
+            const prev = new Map();
+            let seeded = false;
+            const unsub = client.onUpdate(ref, {}, (rows) => {
+              rows = Array.isArray(rows) ? rows : [];
+              const changed = [];
+              for (const r of rows) {
+                const id = r?._id ?? JSON.stringify(r);
+                const sig = JSON.stringify(r);
+                if (seeded && prev.get(id) !== sig) changed.push(r);
+                prev.set(id, sig);
+              }
+              const kind = q.startsWith("refinement") ? "refinement_answer" : "feature_request";
+              if (!seeded) {
+                seeded = true;
+                // FIRST snapshot: if there's already UNHANDLED work (the user
+                // submitted a request / a refinement is open BEFORE this call
+                // started), surface it immediately — don't bury it as baseline.
+                // listPending/listOpen only return unhandled rows, so a non-empty
+                // initial snapshot IS actionable. Empty → wait for the next change.
+                if (rows.length) {
+                  finish({ kind, query: q, count: rows.length, items: rows.slice(0, 5), existing: true });
+                }
+                return;
+              }
+              if (changed.length) {
+                finish({ kind, query: q, count: changed.length, items: changed.slice(0, 5) });
+              }
+            }, (err) => log(`subscription ${q} errored: ${err?.message || err}`));
+            cleanups.push(() => { try { unsub(); } catch {} });
+          }
+          log(`subscribed to ${queries.join(", ")} on ${url}`);
+        } catch (e) { log(`subscription leg failed: ${e.message}`); }
+      })();
+    } else {
+      log("no CONVEX_URL in .env.local — skipping subscription leg (file-watch + heartbeat only)");
+    }
+  });
+}
+
+// ----------------------------------------------------------------- MCP wiring
+const TOOL = {
+  name: "fix_errors_automatically",
+  description:
+    "Stay on watch and fix runtime errors the moment they happen. BLOCKS until the next " +
+    "event in this project and returns it — this tool is read-only (it watches; YOU do the " +
+    "fix with your normal edit/run tools). Races: (1) the local *-errors.log files for " +
+    "convex/next compile/runtime errors, and (2) a Convex subscription for new feature " +
+    "requests / refinement answers. Returns one typed event { kind: feature_request | " +
+    "refinement_answer | convex_error | next_error | quiet }. Use it as your standing " +
+    "idle action: after the app's first version is up, call this in a loop instead of " +
+    "yielding — each call blocks, so you stay on watch and react the instant something " +
+    "happens (an error to fix, or a user request to build). On a 'convex_error'/'next_error' " +
+    "stop and fix it; on a request/answer handle it; on 'quiet' (heartbeat timeout) just " +
+    "call again. ALWAYS pass projectDir = the absolute path of the app you scaffolded.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      projectDir: { type: "string", description: "Absolute project root (where .env.local + *-errors.log live). Always pass this." },
+      timeoutMs: { type: "number", description: "Heartbeat timeout in ms (default 90000, max 290000)." },
+      queries: { type: "array", items: { type: "string" }, description: "Convex query refs to subscribe to (default featureRequests:listPending)." },
+    },
+  },
+};
+
+function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
+function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
+function replyErr(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
+
+async function handle(msg) {
+  const { id, method, params } = msg;
+  switch (method) {
+    case "initialize":
+      return reply(id, {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+      });
+    case "notifications/initialized":
+      return; // notification, no response
+    case "ping":
+      return reply(id, {});
+    case "tools/list":
+      return reply(id, { tools: [TOOL] });
+    case "tools/call": {
+      if (params?.name !== TOOL.name) return replyErr(id, -32602, `unknown tool: ${params?.name}`);
+      try {
+        const event = await waitForConvexEvent(params.arguments || {});
+        return reply(id, { content: [{ type: "text", text: JSON.stringify(event) }] });
+      } catch (e) {
+        return reply(id, { content: [{ type: "text", text: JSON.stringify({ kind: "error", message: e.message }) }], isError: true });
+      }
+    }
+    default:
+      if (id !== undefined) replyErr(id, -32601, `method not found: ${method}`);
+  }
+}
+
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  line = line.trim();
+  if (!line) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { return log("bad JSON: " + line.slice(0, 120)); }
+  Promise.resolve(handle(msg)).catch((e) => log("handler error: " + e.message));
+});
+log(`${SERVER_NAME} ${SERVER_VERSION} ready (stdio)`);
