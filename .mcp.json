@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "convex-plugin": {
+      "command": "node",
+      "args": ["mcp/convex-monitor-mcp.mjs"],
+      "cwd": "."
+    },
+    "convex": {
+      "command": "npx",
+      "args": ["-y", "convex@latest", "mcp", "start"]
+    }
+  }
+}
