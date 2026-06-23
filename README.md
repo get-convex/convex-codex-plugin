@@ -1,8 +1,19 @@
 # Convex Codex Plugin
 
-A Codex plugin that installs the reviewed Convex ChatGPT app for backend development.
+A Codex plugin for building on Convex: scaffold a running app from one sentence and build it live, add capabilities from the Convex component ecosystem, get a `convex-expert` subagent and a `convex-reviewer`, and watch for runtime errors as you go.
 
 Use this when an app needs a backend: database schema, reactive queries, mutations, server functions, auth-aware data access, real-time features, file storage, scheduled jobs, mobile/web app backends, or production scaling guidance.
+
+## Install (Codex CLI)
+
+```bash
+codex plugin marketplace add get-convex/convex-codex-plugin
+codex plugin add convex@convex-codex-plugin
+```
+
+Then invoke the skills (`quickstart`, `add`, `convex-expert`, `convex-reviewer`, `check-updates`, `quickstart-improve`). The plugin also registers two MCP servers: the official Convex MCP (live-deployment introspection) and an error-watcher.
+
+To update later: `codex plugin marketplace upgrade` then re-run `codex plugin add convex@convex-codex-plugin`.
 
 ## ChatGPT app
 
@@ -27,9 +38,10 @@ What is the simplest way to add real-time updates to my app?
 Review my app architecture before launch.
 ```
 
-## Plugin contents
+## Repo contents
 
-- `.codex-plugin/plugin.json` - Codex plugin metadata
-- `.app.json` - ChatGPT app reference
+- `.agents/plugins/marketplace.json` - marketplace manifest (makes the plugin installable)
+- `plugins/convex/` - the Codex CLI plugin (skills + MCP servers)
+- `.codex-plugin/plugin.json` + `.app.json` - the reviewed Convex ChatGPT app (a lighter, coexisting target)
 - `assets/` - Convex brand assets
 
