@@ -4,10 +4,18 @@
 //   2. leg 3: appending to a *-errors.log makes fix_errors_automatically return a typed error event
 //   3. heartbeat: with no event, it returns { kind: "quiet" } after timeoutMs
 //   4. served monitor spec: a local /monitors.json is fetched + used (deterministic
-//      — the main server is pointed at a local fixture, not the live anteater)
+//      — the main server is pointed at a local fixture, not the live anteater).
+//      The fixture serves ONLY /monitors.json (404 elsewhere), so this also covers
+//      the tolerant path: integrity file absent → served config still accepted
 //   5. fallback: with the spec URL pointed at an unreachable port the server logs
 //      the baked-in fallback and still delivers events (offline = old behavior)
+//   6. ReDoS bound: served patterns that are too long or carry nested quantifiers
+//      are REJECTED per kind (spec still SERVED; events fall back to last-line)
+//   7. integrity mismatch: /integrity.json pins a wrong sha256 for monitors.json →
+//      served config REJECTED, baked-in behavior
+//   8. integrity match: correct sha256 pin → served config accepted + verified
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -30,9 +38,16 @@ const SPEC_FIXTURE = JSON.stringify({
     { id: "convex-feature-requests", kind: "feature_request", intervalSec: 12, query: "featureRequests:listPending", description: "Chef panel feature requests. Build them." },
   ],
 });
+// Serve ONLY /monitors.json — /integrity.json etc. 404, like an anteater that
+// predates the integrity pin (the tolerant-absence path must keep working).
 const specSrv = http.createServer((req, res) => {
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(SPEC_FIXTURE);
+  if (req.url.split("?")[0] === "/monitors.json") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(SPEC_FIXTURE);
+  } else {
+    res.writeHead(404);
+    res.end("not found");
+  }
 });
 await new Promise((r) => specSrv.listen(0, "127.0.0.1", r));
 const SPEC_URL = `http://127.0.0.1:${specSrv.address().port}/monitors.json`;
@@ -133,6 +148,101 @@ try {
     ok("fallback still delivers events (next_error via file-watch)", fbEv.kind === "next_error", JSON.stringify(fbEv));
     fb.kill();
     fs.rmSync(fbProj, { recursive: true, force: true });
+  }
+
+  // ---- helpers for the hardening scenarios (6–8) -------------------------
+  // tiny fixture HTTP server: routes = { "/monitors.json": <string body>, … }
+  const serveRoutes = async (routes) => {
+    const s = http.createServer((req, res) => {
+      const body = routes[req.url.split("?")[0]];
+      if (body === undefined) { res.writeHead(404); res.end("not found"); return; }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+    });
+    await new Promise((r) => s.listen(0, "127.0.0.1", r));
+    return { close: () => s.close(), url: (p) => `http://127.0.0.1:${s.address().port}${p}` };
+  };
+  // spawn one MCP server instance wired for rpc + stderr capture
+  const startMcp = (env) => {
+    const errChunks = [];
+    const proc = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+    proc.stderr.on("data", (d) => errChunks.push(d.toString()));
+    let b = ""; const w = new Map(); let id = 1;
+    proc.stdout.on("data", (d) => {
+      b += d.toString();
+      let i;
+      while ((i = b.indexOf("\n")) >= 0) {
+        const line = b.slice(0, i); b = b.slice(i + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.id && w.has(msg.id)) { w.get(msg.id)(msg); w.delete(msg.id); }
+      }
+    });
+    const rpc2 = (method, params) => new Promise((res) => { const mid = id++; w.set(mid, res); proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: mid, method, params }) + "\n"); });
+    const handshake = async () => {
+      await rpc2("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+      proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n");
+    };
+    return { proc, rpc: rpc2, handshake, stderr: () => errChunks.join(""), kill: () => proc.kill() };
+  };
+  const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+  // 6. ReDoS bound — malicious served patterns are rejected per kind
+  {
+    const evilSpec = JSON.stringify({
+      version: 1,
+      monitors: [
+        // classic catastrophic backtracking: quantifier inside a quantified group
+        { id: "convex-runtime-errors", kind: "convex_error", intervalSec: 30, pattern: "(a+)+$", description: "Convex runtime error stream. Fix it." },
+        // over the length cap
+        { id: "next-react-errors", kind: "next_error", intervalSec: 5, pattern: "(error|Failed to compile|" + "x".repeat(400) + ")", description: "Next/React error stream. Fix it." },
+        { id: "convex-feature-requests", kind: "feature_request", intervalSec: 12, query: "featureRequests:listPending", description: "Chef panel feature requests. Build them." },
+      ],
+    });
+    const evilSrv = await serveRoutes({ "/monitors.json": evilSpec });
+    const evilProj = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-evil-"));
+    fs.mkdirSync(path.join(evilProj, ".logs"));
+    const evilLog = path.join(evilProj, ".logs", "convex-errors.log");
+    fs.writeFileSync(evilLog, "");
+    const evil = startMcp({ CONVEX_MONITOR_SPEC_URL: evilSrv.url("/monitors.json") });
+    await evil.handshake();
+    const evilList = await evil.rpc("tools/list", {});
+    ok("malicious nested-quantifier pattern rejected (stderr)", /REJECTED \(nested quantifier/.test(evil.stderr()));
+    ok("over-length pattern rejected (stderr)", /REJECTED \(too long/.test(evil.stderr()));
+    ok("spec itself still SERVED despite pattern rejections", evil.stderr().includes("monitor spec: SERVED from " + evilSrv.url("/monitors.json")));
+    ok("tool name unchanged under malicious spec", evilList.result?.tools?.[0]?.name === "fix_errors_automatically");
+    const evilCallP = evil.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: evilProj, timeoutMs: 8000 } });
+    await sleep(800);
+    fs.appendFileSync(evilLog, "TypeError: boom at convex/messages.ts\n");
+    const evilEv = JSON.parse((await evilCallP).result.content[0].text);
+    ok("events still deliver with rejected pattern (baked last-line behavior)", evilEv.kind === "convex_error" && /TypeError/.test(evilEv.line || ""), JSON.stringify(evilEv));
+    evil.kill(); evilSrv.close();
+    fs.rmSync(evilProj, { recursive: true, force: true });
+  }
+
+  // 7. integrity mismatch — served config REJECTED, baked fallback
+  {
+    const wrongPin = JSON.stringify({ hubSha: "deadbeef", files: { "monitors.json": "0".repeat(64) } });
+    const mmSrv = await serveRoutes({ "/monitors.json": SPEC_FIXTURE, "/integrity.json": wrongPin });
+    const mm = startMcp({ CONVEX_MONITOR_SPEC_URL: mmSrv.url("/monitors.json") });
+    await mm.handshake();
+    const mmList = await mm.rpc("tools/list", {});
+    ok("hash mismatch is detected (stderr says INTEGRITY MISMATCH)", mm.stderr().includes("INTEGRITY MISMATCH"));
+    ok("mismatch rejects served config (no served summaries in description)", !/spec served from Convex/.test(mmList.result?.tools?.[0]?.description || ""));
+    ok("mismatch keeps tool name identical", mmList.result?.tools?.[0]?.name === "fix_errors_automatically");
+    mm.kill(); mmSrv.close();
+  }
+
+  // 8. integrity match — served config accepted + verified
+  {
+    const goodPin = JSON.stringify({ hubSha: "deadbeef", files: { "monitors.json": sha256(SPEC_FIXTURE) } });
+    const okSrv = await serveRoutes({ "/monitors.json": SPEC_FIXTURE, "/integrity.json": goodPin });
+    const good = startMcp({ CONVEX_MONITOR_SPEC_URL: okSrv.url("/monitors.json") });
+    await good.handshake();
+    const goodList = await good.rpc("tools/list", {});
+    ok("hash match verifies (stderr says integrity verified)", good.stderr().includes("integrity verified against " + okSrv.url("/integrity.json")));
+    ok("hash match accepts served config (SERVED + summaries)", good.stderr().includes("monitor spec: SERVED from") && /spec served from Convex/.test(goodList.result?.tools?.[0]?.description || ""));
+    good.kill(); okSrv.close();
   }
 } catch (e) {
   console.error("test threw:", e);
