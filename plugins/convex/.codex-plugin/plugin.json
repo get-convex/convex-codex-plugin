@@ -1,6 +1,6 @@
 {
   "name": "convex",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Scaffold a running Next.js + Convex app from one sentence and build it live (locally), add capabilities from the Convex component ecosystem, and get a reactive, type-safe backend with database, server functions, and scaling guidance — plus a convex-expert subagent, a convex-reviewer, and live error-watching.",
   "author": {
     "name": "Convex, Inc.",
