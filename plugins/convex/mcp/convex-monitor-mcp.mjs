@@ -27,10 +27,80 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const SERVER_NAME = "convex-plugin";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 const PROTOCOL_VERSION = "2024-11-05";
 
 const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
+
+// ------------------------------------------------------ served monitor spec
+// The monitor/notification spec is SERVED from the anteater (single source:
+// convex-agents content/machinery/monitors.json → anteater GET /monitors.json)
+// — fetch-cache-run with a baked-in offline fallback. On a successful fetch we
+// use its per-kind patterns / intervals / descriptions to tune the legs and
+// enrich the tool description, so spec fixes ship by redeploying the anteater
+// with NO plugin re-release. On ANY failure (offline, timeout, bad JSON, empty
+// spec) we run exactly the baked-in behavior below — never crash, never block
+// beyond the fetch timeout. The tool NAME and INPUT SCHEMA are identical either
+// way (no review-triggering surface change).
+const SPEC_URL =
+  process.env.CONVEX_MONITOR_SPEC_URL ||
+  "https://basic-anteater-667.convex.site/monitors.json";
+const SPEC_FETCH_TIMEOUT_MS = 4000;
+
+// Baked-in fallback config == the server's historical behavior, unchanged.
+const BAKED_CONFIG = {
+  source: "baked-in",
+  defaultQueries: ["featureRequests:listPending"],
+  patternByKind: {}, // no per-kind line preference → last appended line wins
+  pollMsByKind: {}, // → 500ms backup size-poll for every watched log
+  kindSummaries: null, // → baked tool description only
+};
+
+function specToConfig(spec) {
+  const cfg = { source: "served", defaultQueries: [], patternByKind: {}, pollMsByKind: {}, kindSummaries: [] };
+  for (const m of spec.monitors) {
+    if (!m || typeof m.kind !== "string") continue;
+    if (typeof m.pattern === "string" && m.pattern) {
+      try { cfg.patternByKind[m.kind] = new RegExp(m.pattern, "i"); } catch {}
+    }
+    if (Number.isFinite(m.intervalSec)) {
+      // The served intervalSec is the shell-loop cadence on other harnesses; our
+      // fs.watch leg is realtime with a backup size-poll — scale interval/10,
+      // clamped to [250, 1000]ms so responsiveness never regresses below today's.
+      cfg.pollMsByKind[m.kind] = Math.max(250, Math.min(1000, m.intervalSec * 100));
+    }
+    if (m.kind === "feature_request" && typeof m.query === "string" && m.query.includes(":")) {
+      cfg.defaultQueries.push(m.query);
+    }
+    if (typeof m.description === "string" && m.description) {
+      const first = (m.description.match(/^.*?\./) || [m.description])[0];
+      cfg.kindSummaries.push(`${m.kind}: ${first.slice(0, 240)}`);
+    }
+  }
+  if (!cfg.defaultQueries.length) cfg.defaultQueries = BAKED_CONFIG.defaultQueries;
+  return cfg;
+}
+
+let CONFIG = BAKED_CONFIG;
+const configReady = (async () => {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), SPEC_FETCH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(SPEC_URL, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const spec = await res.json();
+    if (!Array.isArray(spec?.monitors) || spec.monitors.length === 0) throw new Error("spec has no monitors[]");
+    CONFIG = specToConfig(spec);
+    log(`monitor spec: SERVED from ${SPEC_URL} (v${spec.version ?? "?"}, ${spec.monitors.length} monitors)`);
+  } catch (e) {
+    log(`monitor spec: baked-in fallback (${e?.message || e}) — ${SPEC_URL} unavailable; behavior unchanged`);
+  }
+})();
 
 // ----------------------------------------------------------------- discovery
 // Read CONVEX deployment URL from the project's .env.local.
@@ -88,7 +158,7 @@ async function waitForConvexEvent(args = {}) {
     process.env.PWD ||
     process.cwd();
   const timeoutMs = Math.max(5000, Math.min(args.timeoutMs ?? 90_000, 290_000));
-  const queries = args.queries || ["featureRequests:listPending"];
+  const queries = args.queries || CONFIG.defaultQueries;
 
   const cleanups = [];
   const cleanup = () => { while (cleanups.length) { try { cleanups.pop()(); } catch {} } };
@@ -124,14 +194,24 @@ async function waitForConvexEvent(args = {}) {
           chunk = buf.toString("utf8");
         } catch { return; }
         offset = size;
-        const line = chunk.split("\n").map((s) => s.trim()).filter(Boolean).pop();
-        if (line) finish({ kind: classifyLog(file), file: path.basename(file), line });
+        const kind = classifyLog(file);
+        const lines = chunk.split("\n").map((s) => s.trim()).filter(Boolean);
+        // With a served spec, prefer the last line matching that kind's pattern
+        // (picks the actual error line out of a chunk over stack-trace tails);
+        // without one — or if nothing matches — keep today's behavior: last line.
+        // Never suppress an event: the *-errors.log files are pre-filtered.
+        const re = CONFIG.patternByKind[kind];
+        let line = null;
+        if (re) for (let i = lines.length - 1; i >= 0; i--) { if (re.test(lines[i])) { line = lines[i]; break; } }
+        if (!line) line = lines.length ? lines[lines.length - 1] : null;
+        if (line) finish({ kind, file: path.basename(file), line });
       };
       try {
         const w = fs.watch(file, { persistent: true }, onChange);
         cleanups.push(() => w.close());
-        // fs.watch misses some appends on macOS; back it with a light size poll.
-        const iv = setInterval(onChange, 500);
+        // fs.watch misses some appends on macOS; back it with a light size poll
+        // (served spec may tune the cadence per kind; default stays 500ms).
+        const iv = setInterval(onChange, CONFIG.pollMsByKind[classifyLog(file)] ?? 500);
         cleanups.push(() => clearInterval(iv));
       } catch (e) { log(`watch failed for ${file}: ${e.message}`); }
     }
@@ -211,9 +291,9 @@ async function waitForConvexEvent(args = {}) {
 }
 
 // ----------------------------------------------------------------- MCP wiring
-const TOOL = {
-  name: "fix_errors_automatically",
-  description:
+// NAME and inputSchema are FIXED — the served spec may only enrich the
+// description text. Changing either would be a review-triggering surface change.
+const TOOL_DESCRIPTION_BAKED =
     "Stay on watch and fix runtime errors the moment they happen. BLOCKS until the next " +
     "event in this project and returns it — this tool is read-only (it watches; YOU do the " +
     "fix with your normal edit/run tools). Races: (1) the local *-errors.log files for " +
@@ -224,16 +304,28 @@ const TOOL = {
     "yielding — each call blocks, so you stay on watch and react the instant something " +
     "happens (an error to fix, or a user request to build). On a 'convex_error'/'next_error' " +
     "stop and fix it; on a request/answer handle it; on 'quiet' (heartbeat timeout) just " +
-    "call again. ALWAYS pass projectDir = the absolute path of the app you scaffolded.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      projectDir: { type: "string", description: "Absolute project root (where .env.local + *-errors.log live). Always pass this." },
-      timeoutMs: { type: "number", description: "Heartbeat timeout in ms (default 90000, max 290000)." },
-      queries: { type: "array", items: { type: "string" }, description: "Convex query refs to subscribe to (default featureRequests:listPending)." },
-    },
+    "call again. ALWAYS pass projectDir = the absolute path of the app you scaffolded.";
+
+const TOOL_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    projectDir: { type: "string", description: "Absolute project root (where .env.local + *-errors.log live). Always pass this." },
+    timeoutMs: { type: "number", description: "Heartbeat timeout in ms (default 90000, max 290000)." },
+    queries: { type: "array", items: { type: "string" }, description: "Convex query refs to subscribe to (default featureRequests:listPending)." },
   },
 };
+
+const TOOL_NAME = "fix_errors_automatically";
+
+// The served spec (when reachable) appends a compact per-kind summary so the
+// agent-facing text stays in sync with the single-source monitor descriptions.
+function currentTool() {
+  let description = TOOL_DESCRIPTION_BAKED;
+  if (CONFIG.kindSummaries?.length) {
+    description += " Monitored kinds (spec served from Convex): " + CONFIG.kindSummaries.join(" | ");
+  }
+  return { name: TOOL_NAME, description, inputSchema: TOOL_INPUT_SCHEMA };
+}
 
 function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
 function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
@@ -253,10 +345,14 @@ async function handle(msg) {
     case "ping":
       return reply(id, {});
     case "tools/list":
-      return reply(id, { tools: [TOOL] });
+      // Wait for the spec fetch to settle (≤ SPEC_FETCH_TIMEOUT_MS; usually
+      // instant) so the description reflects the active config deterministically.
+      await configReady;
+      return reply(id, { tools: [currentTool()] });
     case "tools/call": {
-      if (params?.name !== TOOL.name) return replyErr(id, -32602, `unknown tool: ${params?.name}`);
+      if (params?.name !== TOOL_NAME) return replyErr(id, -32602, `unknown tool: ${params?.name}`);
       try {
+        await configReady;
         const event = await waitForConvexEvent(params.arguments || {});
         return reply(id, { content: [{ type: "text", text: JSON.stringify(event) }] });
       } catch (e) {
