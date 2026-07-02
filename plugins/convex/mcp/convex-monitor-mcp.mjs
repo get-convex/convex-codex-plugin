@@ -20,6 +20,7 @@
 // Transport: MCP stdio = newline-delimited JSON-RPC 2.0 on stdin/stdout.
 // stdout is RESERVED for protocol; all diagnostics go to stderr.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -27,7 +28,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const SERVER_NAME = "convex-plugin";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.2.1";
 const PROTOCOL_VERSION = "2024-11-05";
 
 const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
@@ -56,12 +57,43 @@ const BAKED_CONFIG = {
   kindSummaries: null, // → baked tool description only
 };
 
+// --- served-pattern safety (ReDoS bound) -----------------------------------
+// Served regexes run against arbitrary log chunks, so a hostile/buggy spec must
+// not be able to wedge the server. Three bounds, all per-kind (a bad pattern
+// only loses ITS kind's line-preference; baked behavior — last appended line —
+// takes over for that kind):
+//   1. length cap: pathological patterns are long; ours are short alternations.
+//   2. compile-time heuristic: reject a quantified group/class that itself
+//      contains a quantifier — the classic catastrophic-backtracking shapes
+//      ((a+)+, ([a-z]*)+ , (\w{2,})* …).
+//   3. runtime time guard: if any single exec exceeds PATTERN_EXEC_BUDGET_MS,
+//      the pattern is disabled for the rest of the process (see the watch leg).
+const PATTERN_MAX_LEN = 300;
+const PATTERN_EXEC_BUDGET_MS = 50;
+const NESTED_QUANTIFIER =
+  /(?:\((?:[^()\\]|\\.)*(?:[+*]|\{\d+(?:,\d*)?\})(?:[^()\\]|\\.)*\)|\](?:[+*]|\{\d+(?:,\d*)?\}))\s*(?:[+*]|\{\d+(?:,\d*)?\})/;
+
+function vetServedPattern(pattern) {
+  if (pattern.length >= PATTERN_MAX_LEN) return `too long (${pattern.length} >= ${PATTERN_MAX_LEN})`;
+  if (NESTED_QUANTIFIER.test(pattern)) return "nested quantifier (catastrophic-backtracking heuristic)";
+  return null;
+}
+
+// Runtime kill-switch: drop one kind's ACTIVE served pattern (time-guard overrun)
+// and fall back to the baked behavior for that kind, for the rest of the process.
+function disableServedPattern(kind, why) {
+  delete CONFIG.patternByKind[kind];
+  log(`served pattern for kind "${kind}" DISABLED (${why}) — baked behavior (last log line) for that kind`);
+}
+
 function specToConfig(spec) {
   const cfg = { source: "served", defaultQueries: [], patternByKind: {}, pollMsByKind: {}, kindSummaries: [] };
   for (const m of spec.monitors) {
     if (!m || typeof m.kind !== "string") continue;
     if (typeof m.pattern === "string" && m.pattern) {
-      try { cfg.patternByKind[m.kind] = new RegExp(m.pattern, "i"); } catch {}
+      const veto = vetServedPattern(m.pattern);
+      if (veto) log(`served pattern for kind "${m.kind}" REJECTED (${veto}) — baked behavior (last log line) for that kind`);
+      else try { cfg.patternByKind[m.kind] = new RegExp(m.pattern, "i"); } catch {}
     }
     if (Number.isFinite(m.intervalSec)) {
       // The served intervalSec is the shell-loop cadence on other harnesses; our
@@ -81,6 +113,40 @@ function specToConfig(spec) {
   return cfg;
 }
 
+// --- integrity check (soft) --------------------------------------------------
+// The hub also publishes a hash pin next to the registry (convex-agents
+// dist/registry/integrity.json → served at <base>/integrity.json):
+//   { hubSha, files: { "monitors.json": <sha256hex>, … } }
+// If the pin is PRESENT and carries a hash for monitors.json, the fetched bytes
+// must match or the served config is REJECTED (baked fallback + stderr warning)
+// — this catches truncation, partial/stale deploys, and registry↔monitors skew.
+// If the pin is ABSENT (404) or unparseable, proceed as before (tolerant
+// rollout: older anteaters don't serve it yet). NOTE: hash pinning, not signing
+// — the pin shares a host with the payload.
+const INTEGRITY_FILES = ["integrity.json", "registry-meta.json"];
+
+async function fetchExpectedSpecSha() {
+  for (const name of INTEGRITY_FILES) {
+    let url;
+    try { url = new URL(name, SPEC_URL).href; } catch { continue; }
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), SPEC_FETCH_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch(url, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(t);
+      }
+      if (!res.ok) continue; // 404/5xx → try the next name / tolerant absence
+      const meta = await res.json();
+      const sha = meta?.files?.["monitors.json"];
+      if (typeof sha === "string" && /^[0-9a-f]{64}$/i.test(sha)) return { sha: sha.toLowerCase(), url };
+    } catch { /* unreachable/bad JSON → treat as absent */ }
+  }
+  return null;
+}
+
 let CONFIG = BAKED_CONFIG;
 const configReady = (async () => {
   try {
@@ -93,8 +159,20 @@ const configReady = (async () => {
       clearTimeout(t);
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const spec = await res.json();
+    // Hash the EXACT bytes served (not a re-serialization) so the pin comparison
+    // is byte-faithful, then parse the same bytes.
+    const raw = Buffer.from(await res.arrayBuffer());
+    const spec = JSON.parse(raw.toString("utf8"));
     if (!Array.isArray(spec?.monitors) || spec.monitors.length === 0) throw new Error("spec has no monitors[]");
+    const pin = await fetchExpectedSpecSha();
+    if (pin) {
+      const actual = crypto.createHash("sha256").update(raw).digest("hex");
+      if (actual !== pin.sha) {
+        log(`monitor spec: INTEGRITY MISMATCH — ${pin.url} pins monitors.json at sha256 ${pin.sha.slice(0, 12)}…, fetched bytes hash ${actual.slice(0, 12)}… — REJECTING served config, baked-in fallback`);
+        return; // CONFIG stays BAKED_CONFIG
+      }
+      log(`monitor spec: integrity verified against ${pin.url} (sha256 ${actual.slice(0, 12)}…)`);
+    }
     CONFIG = specToConfig(spec);
     log(`monitor spec: SERVED from ${SPEC_URL} (v${spec.version ?? "?"}, ${spec.monitors.length} monitors)`);
   } catch (e) {
@@ -200,9 +278,24 @@ async function waitForConvexEvent(args = {}) {
         // (picks the actual error line out of a chunk over stack-trace tails);
         // without one — or if nothing matches — keep today's behavior: last line.
         // Never suppress an event: the *-errors.log files are pre-filtered.
+        // TIME GUARD (ReDoS bound): if any single exec of the served pattern runs
+        // longer than PATTERN_EXEC_BUDGET_MS, disable that kind's served pattern
+        // for the rest of the process and fall back to baked behavior.
         const re = CONFIG.patternByKind[kind];
         let line = null;
-        if (re) for (let i = lines.length - 1; i >= 0; i--) { if (re.test(lines[i])) { line = lines[i]; break; } }
+        if (re) {
+          for (let i = lines.length - 1; i >= 0; i--) {
+            const t0 = Date.now();
+            let hit = false;
+            try { hit = re.test(lines[i]); } catch { hit = false; }
+            if (Date.now() - t0 > PATTERN_EXEC_BUDGET_MS) {
+              disableServedPattern(kind, `single exec took >${PATTERN_EXEC_BUDGET_MS}ms`);
+              line = null;
+              break;
+            }
+            if (hit) { line = lines[i]; break; }
+          }
+        }
         if (!line) line = lines.length ? lines[lines.length - 1] : null;
         if (line) finish({ kind, file: path.basename(file), line });
       };
