@@ -1,7 +1,7 @@
 ---
-name: labs-quickstart
+name: "labs-quickstart"
 description: "LABS — the FULL Convex quickstart experience: scaffold a running Next.js + shadcn app from one sentence with passkey (WebAuthn) sign-in and a live in-app Chef feedback panel pre-baked, build the idea live, then PUBLISH it to a public https://<app>.convex.app URL (with the user's confirmation before publishing). TRIGGER when the user runs $labs-quickstart, or asks for the full/labs quickstart, a published/public app, sign-in/passkeys, or the in-app feedback panel from scratch. For a plain local-only scaffold use $quickstart instead. SKIP when there's already a Convex project in the cwd."
-license: Apache-2.0
+license: "Apache-2.0"
 ---
 
 # Convex Labs Quickstart ($labs-quickstart)
@@ -46,6 +46,15 @@ project directly:
 - `v.literal("exact value")` for fixed string/enum members, not a bare `v.string()`.
 - `"use node";` is action-only — never in a file that also exports a `query` or
   `mutation`.
+
+## Self-verify — before declaring backend work done
+
+Before you call any backend work finished: run `npx tsc --noEmit` and, when a
+deployment is available (or via a local anonymous one:
+`CONVEX_AGENT_MODE=anonymous npx convex dev --once`), push it. Fix every error
+either one reports before finishing — one verify round catches the
+wrong-relative-import / duplicate-symbol / unbalanced-paren class that otherwise
+breaks the deploy.
 
 ## STEP 0 — launch the scaffold NOW (before anything else)
 

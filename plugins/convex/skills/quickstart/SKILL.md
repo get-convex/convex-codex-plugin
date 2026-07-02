@@ -1,7 +1,7 @@
 ---
-name: quickstart
+name: "quickstart"
 description: "Scaffold a running Next.js + shadcn Convex app from one sentence — convex dev + next dev already running — then build the idea live (runs locally). TRIGGER when the user wants to START a new Convex app from scratch — e.g. they ran $quickstart, said 'scaffold a new app', 'build me an app where users can ___', or 'new app'. SKIP when there's already a Convex project in the cwd."
-license: Apache-2.0
+license: "Apache-2.0"
 ---
 
 # Convex Quickstart (Codex beta)
@@ -44,6 +44,15 @@ wait on the scaffold**. Write a standard Convex project directly:
 - `v.literal("exact value")` for fixed string/enum members, not a bare `v.string()`.
 - `"use node";` is action-only — never in a file that also exports a `query` or
   `mutation`.
+
+## Self-verify — before declaring backend work done
+
+Before you call any backend work finished: run `npx tsc --noEmit` and, when a
+deployment is available (or via a local anonymous one:
+`CONVEX_AGENT_MODE=anonymous npx convex dev --once`), push it. Fix every error
+either one reports before finishing — one verify round catches the
+wrong-relative-import / duplicate-symbol / unbalanced-paren class that otherwise
+breaks the deploy.
 
 ## STEP 0 — launch the scaffold NOW (before anything else)
 
