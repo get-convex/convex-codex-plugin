@@ -7,15 +7,20 @@
 // next event; the agent does the editing through its normal tools. It RACES several
 // event sources and returns the first one to fire, as a typed event:
 //
-//   leg 1 (reactive)  Convex subscription → new feature requests / refinements
-//   leg 3 (robust)    fs.watch on the local *-errors.log files → convex/next errors
-//   heartbeat         after timeoutMs, returns { kind: "quiet" } so the agent re-arms
+//   leg 1 (reactive)    Convex subscription → new feature requests / refinements
+//   leg 3 (robust)      fs.watch on the local *-errors.log files → convex/next errors
+//   leg 4 (typecheck)   debounced fs.watch on convex/*.ts → `convex codegen` + `tsc
+//                       --noEmit`, deduped so an unchanged error doesn't re-notify
+//   heartbeat           after timeoutMs, returns { kind: "quiet" } so the agent re-arms
 //
 // Why a blocking tool instead of polling: the agent's idle action becomes
 // "call fix_errors_automatically" in a loop — each call is one tool-use that blocks,
 // so the agent can't drift into yielding. Leg 3 is load-bearing: the errors that
 // bite (convex dev died, push failed, Next won't compile) happen exactly when a
-// Convex subscription is blind, so we always keep a local file-watch leg.
+// Convex subscription is blind, so we always keep a local file-watch leg. Leg 4
+// closes the last gap: a self-consistent edit (compiles, but breaks Convex's own
+// type rules) never lands in *-errors.log because `convex dev` never even ran it
+// through a type-checker the same way `tsc --noEmit` does.
 //
 // Transport: MCP stdio = newline-delimited JSON-RPC 2.0 on stdin/stdout.
 // stdout is RESERVED for protocol; all diagnostics go to stderr.
@@ -26,6 +31,10 @@ import path from "node:path";
 import readline from "node:readline";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { exec as execCb } from "node:child_process";
+import { promisify } from "node:util";
+
+const exec = promisify(execCb);
 
 const SERVER_NAME = "convex-plugin";
 const SERVER_VERSION = "0.2.1";
@@ -224,6 +233,145 @@ function classifyLog(file) {
   return "dev_error";
 }
 
+// ------------------------------------------------------------- leg 4: typecheck
+// Debounced fs.watch on convex/*.ts → `convex codegen` + `tsc --noEmit`, only
+// notifying when the error output actually changes (a snapshot-diff dedupe, so
+// the same unresolved error doesn't re-fire on every debounce cycle).
+const TYPECHECK_DEBOUNCE_MS = 800;
+const TYPECHECK_TAIL_LINES = 40;
+
+// Last-seen error signature per projectDir, so dedupe survives across repeated
+// (loop) calls to fix_errors_automatically — a fresh Promise/race is built each
+// call, but the leg's "have we already told the agent about this exact error"
+// state must persist across calls, not reset every time.
+const lastTypecheckErrorByProject = new Map();
+
+// Injectable/mockable exec seam: by default this leg shells out to the real
+// `convex codegen` + `tsc --noEmit`. Tests override CONVEX_MONITOR_TSC_CMD with
+// a fake command (e.g. a small fixture script) so they can simulate pass/fail/
+// throw without a real Convex project or a real TypeScript install — mirrors
+// how CONVEX_MONITOR_SPEC_URL already lets tests swap out the served-spec fetch.
+async function runTypecheck(projectDir) {
+  const cmd =
+    process.env.CONVEX_MONITOR_TSC_CMD ||
+    "npx convex codegen && npx tsc --noEmit";
+  return exec(cmd, { cwd: projectDir, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+}
+
+// Self-guard: only arm this leg when there's actually a convex/ directory AND
+// typescript is resolvable from the project's own node_modules. Returning false
+// means the leg must never initialize its watcher — not start and then fail
+// silently on every cycle.
+function typecheckLegEligible(projectDir) {
+  try {
+    if (!fs.statSync(path.join(projectDir, "convex")).isDirectory()) return false;
+  } catch {
+    return false; // no convex/ dir
+  }
+  try {
+    const req = createRequire(path.join(projectDir, "package.json"));
+    req.resolve("typescript/package.json");
+  } catch {
+    return false; // typescript not resolvable (e.g. no node_modules yet)
+  }
+  return true;
+}
+
+function tailLines(text, n) {
+  const lines = String(text || "").split("\n").map((s) => s.trimEnd()).filter(Boolean);
+  return lines.slice(-n).join("\n");
+}
+
+// Arms leg 4 on `projectDir`, calling `finish({ kind: "typecheck_error", ... })`
+// the same way every other leg does. Returns a cleanup fn, or null if the
+// self-guard declined to start the watcher at all.
+function armTypecheckLeg(projectDir, finish, cleanups) {
+  if (!typecheckLegEligible(projectDir)) {
+    log("convex/ missing or typescript not resolvable — skipping typecheck leg");
+    return null;
+  }
+  const convexDir = path.join(projectDir, "convex");
+  let debounceTimer = null;
+  let running = false;
+  let rerunQueued = false;
+
+  const runOnce = async () => {
+    if (running) { rerunQueued = true; return; }
+    running = true;
+    try {
+      await runTypecheck(projectDir);
+      // clean run: clear any previously-notified error so a later regression
+      // is treated as new again instead of being suppressed by stale state.
+      lastTypecheckErrorByProject.delete(projectDir);
+    } catch (e) {
+      // `exec` rejects both for a genuine non-zero exit (tsc found errors,
+      // which is the expected case we want to surface) and for exec-level
+      // failures (bad command, ENOENT, timeout). Treat both the same way:
+      // pull whatever stderr/stdout text is available and tail it — never
+      // let a weird/thrown error crash the server or spam the agent.
+      const text = [e?.stderr, e?.stdout, e?.message].filter(Boolean).join("\n");
+      const line = tailLines(text, TYPECHECK_TAIL_LINES);
+      if (!line) { running = false; if (rerunQueued) { rerunQueued = false; scheduleRun(); } return; }
+      const prev = lastTypecheckErrorByProject.get(projectDir);
+      if (prev !== line) {
+        lastTypecheckErrorByProject.set(projectDir, line);
+        finish({ kind: "typecheck_error", file: "convex/*.ts", line });
+      }
+      // else: identical to the last notified error — stay quiet (dedupe).
+    } finally {
+      running = false;
+      if (rerunQueued) { rerunQueued = false; scheduleRun(); }
+    }
+  };
+
+  const scheduleRun = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(runOnce, TYPECHECK_DEBOUNCE_MS);
+  };
+
+  const onChange = (_evt, filename) => {
+    if (filename && !String(filename).endsWith(".ts")) return;
+    scheduleRun();
+  };
+
+  let watcher;
+  try {
+    watcher = fs.watch(convexDir, { persistent: true }, onChange);
+  } catch (e) {
+    log(`typecheck leg: watch failed for ${convexDir}: ${e.message}`);
+    return null;
+  }
+  cleanups.push(() => { try { watcher.close(); } catch {} });
+  // fs.watch on a directory misses some editor save patterns (atomic
+  // rename-over-write) on some platforms; back it with a light mtime poll,
+  // same idiom leg 3 uses for its file watches.
+  let lastMtimeSig = "";
+  const snapshotMtimes = () => {
+    let sig = "";
+    try {
+      for (const f of fs.readdirSync(convexDir)) {
+        if (!f.endsWith(".ts")) continue;
+        try { sig += f + ":" + fs.statSync(path.join(convexDir, f)).mtimeMs + ";"; } catch {}
+      }
+    } catch { /* leave sig empty */ }
+    return sig;
+  };
+  lastMtimeSig = snapshotMtimes(); // seed baseline; never schedules a run
+  const pollMtimes = () => {
+    const sig = snapshotMtimes();
+    if (sig !== lastMtimeSig) {
+      lastMtimeSig = sig;
+      scheduleRun();
+    }
+  };
+  const iv = setInterval(pollMtimes, 500);
+  cleanups.push(() => clearInterval(iv));
+  cleanups.push(() => { if (debounceTimer) clearTimeout(debounceTimer); });
+
+  log(`typecheck leg: watching ${convexDir}`);
+  return true;
+}
+
 // --------------------------------------------------------------- the race
 async function waitForConvexEvent(args = {}) {
   // The MCP server may be launched with cwd = plugin root (not the project), so
@@ -309,6 +457,9 @@ async function waitForConvexEvent(args = {}) {
       } catch (e) { log(`watch failed for ${file}: ${e.message}`); }
     }
 
+    // --- leg 4: debounced typecheck (convex codegen + tsc --noEmit) ------
+    armTypecheckLeg(projectDir, finish, cleanups);
+
     // --- leg 1: Convex subscription (reactive) ---------------------------
     const url = readConvexUrl(projectDir);
     if (url) {
@@ -390,14 +541,16 @@ const TOOL_DESCRIPTION_BAKED =
     "Stay on watch and fix runtime errors the moment they happen. BLOCKS until the next " +
     "event in this project and returns it — this tool is read-only (it watches; YOU do the " +
     "fix with your normal edit/run tools). Races: (1) the local *-errors.log files for " +
-    "convex/next compile/runtime errors, and (2) a Convex subscription for new feature " +
-    "requests / refinement answers. Returns one typed event { kind: feature_request | " +
-    "refinement_answer | convex_error | next_error | quiet }. Use it as your standing " +
-    "idle action: after the app's first version is up, call this in a loop instead of " +
-    "yielding — each call blocks, so you stay on watch and react the instant something " +
-    "happens (an error to fix, or a user request to build). On a 'convex_error'/'next_error' " +
-    "stop and fix it; on a request/answer handle it; on 'quiet' (heartbeat timeout) just " +
-    "call again. ALWAYS pass projectDir = the absolute path of the app you scaffolded.";
+    "convex/next compile/runtime errors, (2) a Convex subscription for new feature " +
+    "requests / refinement answers, and (3) a debounced `convex codegen` + `tsc --noEmit` " +
+    "typecheck on convex/*.ts changes. Returns one typed event { kind: feature_request | " +
+    "refinement_answer | convex_error | next_error | typecheck_error | quiet }. Use it as " +
+    "your standing idle action: after the app's first version is up, call this in a loop " +
+    "instead of yielding — each call blocks, so you stay on watch and react the instant " +
+    "something happens (an error to fix, or a user request to build). On a " +
+    "'convex_error'/'next_error'/'typecheck_error' stop and fix it; on a request/answer " +
+    "handle it; on 'quiet' (heartbeat timeout) just call again. ALWAYS pass projectDir = " +
+    "the absolute path of the app you scaffolded.";
 
 const TOOL_INPUT_SCHEMA = {
   type: "object",

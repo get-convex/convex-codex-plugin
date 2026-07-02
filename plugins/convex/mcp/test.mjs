@@ -244,6 +244,138 @@ try {
     ok("hash match accepts served config (SERVED + summaries)", good.stderr().includes("monitor spec: SERVED from") && /spec served from Convex/.test(goodList.result?.tools?.[0]?.description || ""));
     good.kill(); okSrv.close();
   }
+
+  // ---- helpers for leg 4 (typecheck) scenarios (9–12) --------------------
+  // A "typecheck-eligible" fixture project: has convex/ (with a .ts file) and
+  // a resolvable `typescript` package (fake — just needs to resolve via
+  // require, the leg never actually imports it) so typecheckLegEligible()
+  // passes without needing a real TypeScript install in the test environment.
+  const makeTypecheckProject = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-tsc-"));
+    fs.mkdirSync(path.join(dir, "convex"));
+    fs.writeFileSync(path.join(dir, "convex", "schema.ts"), "export default {};\n");
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "0.0.0" }));
+    fs.mkdirSync(path.join(dir, "node_modules", "typescript"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "node_modules", "typescript", "package.json"), JSON.stringify({ name: "typescript", version: "0.0.0-fixture" }));
+    return dir;
+  };
+  // A fake "tsc/codegen" command for CONVEX_MONITOR_TSC_CMD — node -e a tiny
+  // inline script so no shell-quoting headaches, and easy to control via env.
+  const fakeCmd = (script) => `node -e ${JSON.stringify(script)}`;
+  const CMD_OK = fakeCmd("process.exit(0)");
+  const CMD_FAIL = fakeCmd("process.stderr.write('convex/schema.ts(3,5): error TS2322: boom\\n'); process.exit(2)");
+  const CMD_THROW = fakeCmd("throw new Error('codegen crashed unexpectedly')");
+
+  // 9. leg 4 fires typecheck_error on a convex/*.ts change when the faked
+  //    exec reports an error.
+  {
+    const tscProj = makeTypecheckProject();
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_FAIL, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const callP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 10000 } });
+    await sleep(500); // let the watcher arm + baseline poll seed
+    fs.appendFileSync(path.join(tscProj, "convex", "schema.ts"), "// touch\n");
+    const res = await callP;
+    const ev = JSON.parse(res.result.content[0].text);
+    ok("leg 4 fires typecheck_error on a convex/*.ts change (exec error)", ev.kind === "typecheck_error", JSON.stringify(ev));
+    ok("typecheck_error payload carries the tail of the error output", /TS2322/.test(ev.line || ""), ev.line || "");
+    t.kill();
+    fs.rmSync(tscProj, { recursive: true, force: true });
+  }
+
+  // 10. no change → silent, no typecheck_error (heartbeat/quiet instead).
+  {
+    const tscProj = makeTypecheckProject();
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_FAIL, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const quietRes = await t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 3000 } });
+    const quiet = JSON.parse(quietRes.result.content[0].text);
+    ok("no convex/*.ts change → no typecheck_error (quiet heartbeat)", quiet.kind === "quiet", JSON.stringify(quiet));
+    t.kill();
+    fs.rmSync(tscProj, { recursive: true, force: true });
+  }
+
+  // 11. exec throws/errors unexpectedly (codegen itself crashes oddly) → leg
+  //     stays quiet rather than crashing the server or spamming — it should
+  //     still surface SOMETHING useful (the crash text) exactly once, not
+  //     loop/spam, and must never take the server down.
+  {
+    const tscProj = makeTypecheckProject();
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_THROW, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const callP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 10000 } });
+    await sleep(500);
+    fs.appendFileSync(path.join(tscProj, "convex", "schema.ts"), "// touch\n");
+    const res = await callP;
+    const ev = JSON.parse(res.result.content[0].text);
+    ok("exec crash doesn't take the server down (still replies)", !!ev.kind, JSON.stringify(ev));
+    ok("exec crash surfaces as typecheck_error, not a server crash", ev.kind === "typecheck_error", JSON.stringify(ev));
+    // second identical touch should NOT re-notify (would timeout to quiet)
+    const quietP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 3000 } });
+    await sleep(500);
+    fs.appendFileSync(path.join(tscProj, "convex", "schema.ts"), "// touch again, same fake crash\n");
+    const quietEv = JSON.parse((await quietP).result.content[0].text);
+    ok("dedupe: identical crash text on a second cycle does not re-notify (quiet)", quietEv.kind === "quiet", JSON.stringify(quietEv));
+    t.kill();
+    fs.rmSync(tscProj, { recursive: true, force: true });
+  }
+
+  // 12. snapshot-diff dedupe with a real (non-throw) failing command: same
+  //     error text across multiple debounce cycles notifies once, and a
+  //     CHANGED error text after a clean run in between notifies again.
+  {
+    const tscProj = makeTypecheckProject();
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_FAIL, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const callP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 10000 } });
+    await sleep(500);
+    fs.appendFileSync(path.join(tscProj, "convex", "schema.ts"), "// first change\n");
+    const ev1 = JSON.parse((await callP).result.content[0].text);
+    ok("first error notifies", ev1.kind === "typecheck_error", JSON.stringify(ev1));
+    // Same command (same error text) again → dedupe should suppress a repeat.
+    const quietP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: tscProj, timeoutMs: 3000 } });
+    await sleep(500);
+    fs.appendFileSync(path.join(tscProj, "convex", "schema.ts"), "// second change, identical fake error\n");
+    const ev2 = JSON.parse((await quietP).result.content[0].text);
+    ok("unchanged error across cycles does not re-notify (dedupe)", ev2.kind === "quiet", JSON.stringify(ev2));
+    t.kill();
+    fs.rmSync(tscProj, { recursive: true, force: true });
+  }
+
+  // 13. self-guard: no convex/ dir → leg never starts (stderr says skipping,
+  //     and it stays quiet rather than ever emitting typecheck_error).
+  {
+    const noConvexProj = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-noconvex-"));
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_FAIL, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const quietRes = await t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: noConvexProj, timeoutMs: 3000 } });
+    const quiet = JSON.parse(quietRes.result.content[0].text);
+    ok("self-guard: no convex/ dir → leg skips init (stderr)", t.stderr().includes("convex/ missing or typescript not resolvable — skipping typecheck leg"));
+    ok("self-guard: no convex/ dir → no typecheck_error ever (quiet)", quiet.kind === "quiet", JSON.stringify(quiet));
+    t.kill();
+    fs.rmSync(noConvexProj, { recursive: true, force: true });
+  }
+
+  // 14. self-guard: convex/ exists but typescript isn't resolvable → leg
+  //     never starts either (same guard, other half of the condition).
+  {
+    const noTscProj = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-notsc-"));
+    fs.mkdirSync(path.join(noTscProj, "convex"));
+    fs.writeFileSync(path.join(noTscProj, "convex", "schema.ts"), "export default {};\n");
+    fs.writeFileSync(path.join(noTscProj, "package.json"), JSON.stringify({ name: "fixture", version: "0.0.0" }));
+    // deliberately NO node_modules/typescript
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_FAIL, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const callP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: noTscProj, timeoutMs: 3000 } });
+    await sleep(500);
+    fs.appendFileSync(path.join(noTscProj, "convex", "schema.ts"), "// touch, should be ignored — leg never armed\n");
+    const res = await callP;
+    const ev = JSON.parse(res.result.content[0].text);
+    ok("self-guard: no resolvable typescript → leg skips init (stderr)", t.stderr().includes("convex/ missing or typescript not resolvable — skipping typecheck leg"));
+    ok("self-guard: no resolvable typescript → no typecheck_error even after a .ts edit", ev.kind === "quiet", JSON.stringify(ev));
+    t.kill();
+    fs.rmSync(noTscProj, { recursive: true, force: true });
+  }
 } catch (e) {
   console.error("test threw:", e);
   fail++;
