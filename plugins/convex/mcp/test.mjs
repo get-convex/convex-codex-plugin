@@ -376,6 +376,101 @@ try {
     t.kill();
     fs.rmSync(noTscProj, { recursive: true, force: true });
   }
+  // ---- leg 6 (lint) scenarios (15–17) ------------------------------------
+  // The typecheck leg also arms on these fixtures; CMD_OK keeps it quiet so
+  // only the lint leg can produce a non-quiet event.
+
+  // 15. writing a convex/*.ts file with a hard-deny anti-pattern fires
+  //     lint_error with the rule id and the fix text.
+  {
+    const lintProj = makeTypecheckProject();
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_OK, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const callP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: lintProj, timeoutMs: 10000 } });
+    await sleep(500); // let the watcher arm + baseline scan
+    fs.writeFileSync(
+      path.join(lintProj, "convex", "messages.ts"),
+      `export const list = query({ args: {}, handler: async (ctx) => ctx.db.query("messages").filter(q => q.eq(q.field("channel"), "x")).collect() });\n`,
+    );
+    const ev = JSON.parse((await callP).result.content[0].text);
+    ok("leg 6 fires lint_error on an anti-pattern write", ev.kind === "lint_error", JSON.stringify(ev));
+    ok("lint_error names the rule and file", ev.rule === "db_filter" && ev.file === "convex/messages.ts", `${ev.rule} ${ev.file}`);
+    ok("lint_error carries the fix text", /withIndex/.test(ev.line || ""), ev.line || "");
+
+    // 16. dedupe: a second write with the SAME findings does not re-notify.
+    const quietP = t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: lintProj, timeoutMs: 3000 } });
+    await sleep(300);
+    fs.appendFileSync(path.join(lintProj, "convex", "messages.ts"), "// cosmetic change, same finding\n");
+    const quietEv = JSON.parse((await quietP).result.content[0].text);
+    ok("lint dedupe: unchanged findings do not re-notify (quiet)", quietEv.kind === "quiet", JSON.stringify(quietEv));
+    t.kill();
+    fs.rmSync(lintProj, { recursive: true, force: true });
+  }
+
+  // 17. baseline: violations that already exist when the leg FIRST arms are
+  //     NOT replayed (parity with the Claude hook, which only fires on writes).
+  {
+    const baseProj = makeTypecheckProject();
+    fs.writeFileSync(
+      path.join(baseProj, "convex", "old.ts"),
+      `export const remove = mutation(async (ctx) => {});\n`, // positional_syntax, pre-existing
+    );
+    const t = startMcp({ CONVEX_MONITOR_TSC_CMD: CMD_OK, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" });
+    await t.handshake();
+    const quietRes = await t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: baseProj, timeoutMs: 3000 } });
+    const quiet = JSON.parse(quietRes.result.content[0].text);
+    ok("lint baseline: pre-existing violations are not replayed (quiet)", quiet.kind === "quiet", JSON.stringify(quiet));
+    t.kill();
+    fs.rmSync(baseProj, { recursive: true, force: true });
+  }
+
+  // ---- leg 5 (insights) scenarios (18–19) ---------------------------------
+  // Fake `npx convex insights` via the exec seam: emits one OCC line on the
+  // first run and adds a NEW read-limit line from the second run on (state via
+  // a counter file in the project dir — exec runs with cwd=projectDir).
+  const INSIGHTS_FAKE = fakeCmd(
+    "const fs=require('fs');let n=0;try{n=+fs.readFileSync('.count','utf8')}catch{};n++;fs.writeFileSync('.count',String(n));" +
+    "console.log('occRetried in messages:send conflict on table messages');" +
+    "if(n>1)console.log('documentsRead Limit exceeded in tasks:list');",
+  );
+
+  // 18. first poll = silent baseline; the next interval poll surfaces ONLY the
+  //     new line as an `occ` event.
+  {
+    const insProj = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-ins-"));
+    fs.writeFileSync(path.join(insProj, ".env.local"), "CONVEX_DEPLOYMENT=dev:brave-fox-123\n");
+    const t = startMcp({
+      CONVEX_MONITOR_INSIGHTS_CMD: INSIGHTS_FAKE,
+      CONVEX_MONITOR_INSIGHTS_INTERVAL_MS: "1500",
+      CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json",
+    });
+    await t.handshake();
+    const res = await t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: insProj, timeoutMs: 10000 } });
+    const ev = JSON.parse(res.result.content[0].text);
+    ok("leg 5 fires occ on a NEW insight after the baseline poll", ev.kind === "occ", JSON.stringify(ev));
+    ok("occ event carries only the new line (baseline diffed away)", /documentsRead Limit/.test(ev.line || "") && !/occRetried/.test(ev.line || ""), ev.line || "");
+    ok("occ event carries the fix playbook note", /withIndex|aggregate|--details/.test(ev.note || ""), ev.note || "");
+    t.kill();
+    fs.rmSync(insProj, { recursive: true, force: true });
+  }
+
+  // 19. self-guard: anonymous/local deployment → leg never arms.
+  {
+    const anonProj = fs.mkdtempSync(path.join(os.tmpdir(), "chefmon-anon-"));
+    fs.writeFileSync(path.join(anonProj, ".env.local"), "CONVEX_DEPLOYMENT=anonymous:anonymous-fox\n");
+    const t = startMcp({
+      CONVEX_MONITOR_INSIGHTS_CMD: INSIGHTS_FAKE,
+      CONVEX_MONITOR_INSIGHTS_INTERVAL_MS: "500",
+      CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json",
+    });
+    await t.handshake();
+    const quietRes = await t.rpc("tools/call", { name: "fix_errors_automatically", arguments: { projectDir: anonProj, timeoutMs: 3000 } });
+    const quiet = JSON.parse(quietRes.result.content[0].text);
+    ok("insights self-guard: anonymous deployment → leg skipped (stderr)", t.stderr().includes("insights leg: no cloud CONVEX_DEPLOYMENT"));
+    ok("insights self-guard: anonymous deployment → no occ event (quiet)", quiet.kind === "quiet", JSON.stringify(quiet));
+    t.kill();
+    fs.rmSync(anonProj, { recursive: true, force: true });
+  }
 } catch (e) {
   console.error("test threw:", e);
   fail++;
