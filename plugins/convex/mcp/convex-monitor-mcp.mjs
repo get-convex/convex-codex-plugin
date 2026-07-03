@@ -11,6 +11,13 @@
 //   leg 3 (robust)      fs.watch on the local *-errors.log files → convex/next errors
 //   leg 4 (typecheck)   debounced fs.watch on convex/*.ts → `convex codegen` + `tsc
 //                       --noEmit`, deduped so an unchanged error doesn't re-notify
+//   leg 5 (insights)    `npx convex insights` polled on the served cadence (default
+//                       10 min), snapshot-diffed → NEW OCC write-conflict / read-limit
+//                       findings only (kind `occ`); silent on local/anonymous deploys
+//   leg 6 (lint)        debounced fs.watch on convex/*.ts → pure-regex Convex
+//                       anti-pattern rules (see convex-lint-rules.mjs; the same hard
+//                       denies as the Claude plugin's PreToolUse hook, which Codex
+//                       can't run) → kind `lint_error`, per-file signature dedupe
 //   heartbeat           after timeoutMs, returns { kind: "quiet" } so the agent re-arms
 //
 // Why a blocking tool instead of polling: the agent's idle action becomes
@@ -36,8 +43,10 @@ import { promisify } from "node:util";
 
 const exec = promisify(execCb);
 
+import { lintConvexSource } from "./convex-lint-rules.mjs";
+
 const SERVER_NAME = "convex-plugin";
-const SERVER_VERSION = "0.2.1";
+const SERVER_VERSION = "0.3.0";
 const PROTOCOL_VERSION = "2024-11-05";
 
 const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
@@ -63,6 +72,7 @@ const BAKED_CONFIG = {
   defaultQueries: ["featureRequests:listPending"],
   patternByKind: {}, // no per-kind line preference → last appended line wins
   pollMsByKind: {}, // → 500ms backup size-poll for every watched log
+  intervalSecByKind: {}, // → baked per-leg cadences (insights: 600s)
   kindSummaries: null, // → baked tool description only
 };
 
@@ -96,7 +106,7 @@ function disableServedPattern(kind, why) {
 }
 
 function specToConfig(spec) {
-  const cfg = { source: "served", defaultQueries: [], patternByKind: {}, pollMsByKind: {}, kindSummaries: [] };
+  const cfg = { source: "served", defaultQueries: [], patternByKind: {}, pollMsByKind: {}, intervalSecByKind: {}, kindSummaries: [] };
   for (const m of spec.monitors) {
     if (!m || typeof m.kind !== "string") continue;
     if (typeof m.pattern === "string" && m.pattern) {
@@ -105,6 +115,9 @@ function specToConfig(spec) {
       else try { cfg.patternByKind[m.kind] = new RegExp(m.pattern, "i"); } catch {}
     }
     if (Number.isFinite(m.intervalSec)) {
+      // Raw served cadence, for polling legs (insights) whose interval IS the
+      // shell-loop cadence rather than a log-watch backup poll.
+      cfg.intervalSecByKind[m.kind] = m.intervalSec;
       // The served intervalSec is the shell-loop cadence on other harnesses; our
       // fs.watch leg is realtime with a backup size-poll — scale interval/10,
       // clamped to [250, 1000]ms so responsiveness never regresses below today's.
@@ -372,6 +385,224 @@ function armTypecheckLeg(projectDir, finish, cleanups) {
   return true;
 }
 
+// ------------------------------------------------------------- leg 5: insights
+// Poll `npx convex insights` on the served cadence (default 600s) and surface
+// only NEW OCC write-conflict / read-limit lines, snapshot-diffed — the same
+// semantics as the Claude shell monitor (first successful poll is a silent
+// baseline; the baseline is replaced on every poll so each notification means
+// something NEW went wrong). State is module-level so the cadence and the
+// baseline survive across repeated (loop) calls to fix_errors_automatically:
+// each call polls immediately iff the interval has elapsed since the last poll,
+// otherwise it schedules the poll for when it comes due inside this call.
+const INSIGHTS_INTERVAL_MS_BAKED = 600_000;
+const INSIGHTS_PATTERN_BAKED = /occ|conflict|bytes read|documents read|limit|threshold/i;
+const insightsStateByProject = new Map(); // dir → { baseline: Set|null, lastPollAt: 0, running: false }
+
+// Self-guard: `npx convex insights` only works for cloud deployments with
+// user-level auth — local/anonymous deployments error. Hard-gate on .env.local
+// having a non-anonymous CONVEX_DEPLOYMENT so the leg never even starts there.
+function insightsLegEligible(projectDir) {
+  try {
+    const txt = fs.readFileSync(path.join(projectDir, ".env.local"), "utf8");
+    const m = txt.match(/^CONVEX_DEPLOYMENT=(.+)$/m);
+    if (!m) return false;
+    const v = m[1].trim().replace(/^["']|["']$/g, "");
+    return !!v && !/^anonymous/i.test(v);
+  } catch {
+    return false;
+  }
+}
+
+// Injectable/mockable exec seam (same idiom as CONVEX_MONITOR_TSC_CMD).
+async function runInsights(projectDir) {
+  const cmd = process.env.CONVEX_MONITOR_INSIGHTS_CMD || "npx convex insights";
+  return exec(cmd, { cwd: projectDir, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+}
+
+function armInsightsLeg(projectDir, finish, cleanups) {
+  if (!insightsLegEligible(projectDir)) {
+    log("insights leg: no cloud CONVEX_DEPLOYMENT in .env.local — skipping");
+    return null;
+  }
+  const intervalMs = Math.max(
+    5_000,
+    Number(process.env.CONVEX_MONITOR_INSIGHTS_INTERVAL_MS) ||
+      (Number.isFinite(CONFIG.intervalSecByKind?.occ)
+        ? CONFIG.intervalSecByKind.occ * 1000
+        : INSIGHTS_INTERVAL_MS_BAKED),
+  );
+  let st = insightsStateByProject.get(projectDir);
+  if (!st) {
+    st = { baseline: null, lastPollAt: 0, running: false };
+    insightsStateByProject.set(projectDir, st);
+  }
+  const pollOnce = async () => {
+    if (st.running) return;
+    st.running = true;
+    try {
+      const { stdout } = await runInsights(projectDir);
+      st.lastPollAt = Date.now();
+      const re = CONFIG.patternByKind.occ || INSIGHTS_PATTERN_BAKED;
+      const lines = String(stdout || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((l) => {
+          const t0 = Date.now();
+          let hit = false;
+          try { hit = re.test(l); } catch { hit = false; }
+          if (Date.now() - t0 > PATTERN_EXEC_BUDGET_MS) {
+            disableServedPattern("occ", `single exec took >${PATTERN_EXEC_BUDGET_MS}ms`);
+            try { return INSIGHTS_PATTERN_BAKED.test(l); } catch { return false; }
+          }
+          return hit;
+        });
+      const set = new Set(lines);
+      if (st.baseline === null) {
+        st.baseline = set; // first successful poll = silent baseline
+        return;
+      }
+      const fresh = lines.filter((l) => !st.baseline.has(l));
+      st.baseline = set; // baseline is always the latest snapshot
+      if (fresh.length) {
+        finish({
+          kind: "occ",
+          source: "npx convex insights",
+          count: fresh.length,
+          line: fresh.slice(0, 10).join("\n"),
+          note: "new deployment insight(s) — run `npx convex insights --details` to see which function and table; shrink the transaction / use @convex-dev/aggregate for hot counters / add .withIndex() or .paginate() for read limits",
+        });
+      }
+    } catch (e) {
+      // Non-zero exit / timeout / auth error → silent (matches the shell
+      // monitor: local or key-authed deployments simply don't get this leg).
+      st.lastPollAt = Date.now();
+      log(`insights leg: poll failed (${String(e?.message || e).slice(0, 120)}) — silent`);
+    } finally {
+      st.running = false;
+    }
+  };
+  const dueInMs = st.lastPollAt + intervalMs - Date.now();
+  let dueTimer = null;
+  if (dueInMs <= 0) pollOnce();
+  else dueTimer = setTimeout(pollOnce, dueInMs);
+  const iv = setInterval(pollOnce, intervalMs);
+  cleanups.push(() => { if (dueTimer) clearTimeout(dueTimer); clearInterval(iv); });
+  log(`insights leg: polling deployment insights every ${Math.round(intervalMs / 1000)}s`);
+  return true;
+}
+
+// ---------------------------------------------------------------- leg 6: lint
+// Debounced fs.watch on convex/*.ts → pure-regex anti-pattern rules
+// (convex-lint-rules.mjs — the same hard denies as the Claude plugin's
+// PreToolUse hook). Codex has no pre-tool-use hook to block the write before
+// it lands, so this leg surfaces the pattern seconds after the file changes,
+// before a `convex dev` push cycle is wasted on it. Per-file finding-signature
+// dedupe (module-level, survives across calls); the findings present when the
+// leg FIRST arms in this server process are baselined silently — parity with
+// the hook, which only ever fires on new writes.
+const LINT_DEBOUNCE_MS = 300;
+const lintSigsByProject = new Map(); // dir → Map(relFile → findings signature)
+
+function scanConvexDirForLint(projectDir) {
+  const convexDir = path.join(projectDir, "convex");
+  const out = new Map(); // relFile → findings[]
+  let entries = [];
+  try { entries = fs.readdirSync(convexDir); } catch { return out; }
+  for (const f of entries) {
+    if (!f.endsWith(".ts") || f.endsWith(".d.ts")) continue;
+    let content;
+    try { content = fs.readFileSync(path.join(convexDir, f), "utf8"); } catch { continue; }
+    let findings = [];
+    try { findings = lintConvexSource("convex/" + f, content); } catch { continue; }
+    if (findings.length) out.set("convex/" + f, findings);
+  }
+  return out;
+}
+
+const lintSignature = (findings) => JSON.stringify(findings.map((f) => f.rule + ":" + f.message));
+
+function armLintLeg(projectDir, finish, cleanups) {
+  const convexDir = path.join(projectDir, "convex");
+  try {
+    if (!fs.statSync(convexDir).isDirectory()) return null;
+  } catch {
+    log("lint leg: no convex/ dir — skipping");
+    return null;
+  }
+  let sigs = lintSigsByProject.get(projectDir);
+  if (!sigs) {
+    sigs = new Map();
+    for (const [file, findings] of scanConvexDirForLint(projectDir)) {
+      sigs.set(file, lintSignature(findings)); // silent baseline on first arm
+    }
+    lintSigsByProject.set(projectDir, sigs);
+  }
+  let debounceTimer = null;
+  const scan = () => {
+    try {
+      const current = scanConvexDirForLint(projectDir);
+      for (const [file, findings] of current) {
+        const sig = lintSignature(findings);
+        if (sigs.get(file) !== sig) {
+          sigs.set(file, sig);
+          const first = findings[0];
+          finish({
+            kind: "lint_error",
+            file,
+            rule: first.rule,
+            count: findings.length,
+            line: `convex-lint rule "${first.rule}": ${first.message}`,
+          });
+          return;
+        }
+      }
+      // Files that are now clean drop their signature, so a later regression
+      // to the same finding re-notifies instead of being suppressed.
+      for (const file of [...sigs.keys()]) if (!current.has(file)) sigs.delete(file);
+    } catch (e) {
+      log(`lint leg: scan failed (${e.message})`);
+    }
+  };
+  const onChange = (_evt, filename) => {
+    if (filename && !String(filename).endsWith(".ts")) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(scan, LINT_DEBOUNCE_MS);
+  };
+  let watcher;
+  try {
+    watcher = fs.watch(convexDir, { persistent: true }, onChange);
+  } catch (e) {
+    log(`lint leg: watch failed for ${convexDir}: ${e.message}`);
+    return null;
+  }
+  cleanups.push(() => { try { watcher.close(); } catch {} });
+  cleanups.push(() => { if (debounceTimer) clearTimeout(debounceTimer); });
+  // Same atomic-save blind spot as leg 4: back the watch with a light mtime poll.
+  let lastMtimeSig = "";
+  const snapshotMtimes = () => {
+    let sig = "";
+    try {
+      for (const f of fs.readdirSync(convexDir)) {
+        if (!f.endsWith(".ts")) continue;
+        try { sig += f + ":" + fs.statSync(path.join(convexDir, f)).mtimeMs + ";"; } catch {}
+      }
+    } catch { /* leave sig empty */ }
+    return sig;
+  };
+  lastMtimeSig = snapshotMtimes();
+  const iv = setInterval(() => {
+    const sig = snapshotMtimes();
+    if (sig !== lastMtimeSig) {
+      lastMtimeSig = sig;
+      onChange(null, "poll.ts");
+    }
+  }, 500);
+  cleanups.push(() => clearInterval(iv));
+  log(`lint leg: watching ${convexDir}`);
+  return true;
+}
+
 // --------------------------------------------------------------- the race
 async function waitForConvexEvent(args = {}) {
   // The MCP server may be launched with cwd = plugin root (not the project), so
@@ -460,6 +691,12 @@ async function waitForConvexEvent(args = {}) {
     // --- leg 4: debounced typecheck (convex codegen + tsc --noEmit) ------
     armTypecheckLeg(projectDir, finish, cleanups);
 
+    // --- leg 5: deployment insights (OCC / read limits), snapshot-diffed --
+    armInsightsLeg(projectDir, finish, cleanups);
+
+    // --- leg 6: convex/*.ts anti-pattern lint (hook parity) ---------------
+    armLintLeg(projectDir, finish, cleanups);
+
     // --- leg 1: Convex subscription (reactive) ---------------------------
     const url = readConvexUrl(projectDir);
     if (url) {
@@ -542,15 +779,19 @@ const TOOL_DESCRIPTION_BAKED =
     "event in this project and returns it — this tool is read-only (it watches; YOU do the " +
     "fix with your normal edit/run tools). Races: (1) the local *-errors.log files for " +
     "convex/next compile/runtime errors, (2) a Convex subscription for new feature " +
-    "requests / refinement answers, and (3) a debounced `convex codegen` + `tsc --noEmit` " +
-    "typecheck on convex/*.ts changes. Returns one typed event { kind: feature_request | " +
-    "refinement_answer | convex_error | next_error | typecheck_error | quiet }. Use it as " +
-    "your standing idle action: after the app's first version is up, call this in a loop " +
-    "instead of yielding — each call blocks, so you stay on watch and react the instant " +
-    "something happens (an error to fix, or a user request to build). On a " +
-    "'convex_error'/'next_error'/'typecheck_error' stop and fix it; on a request/answer " +
-    "handle it; on 'quiet' (heartbeat timeout) just call again. ALWAYS pass projectDir = " +
-    "the absolute path of the app you scaffolded.";
+    "requests / refinement answers, (3) a debounced `convex codegen` + `tsc --noEmit` " +
+    "typecheck on convex/*.ts changes, (4) `npx convex insights` polled for NEW OCC " +
+    "write-conflict / read-limit findings (cloud deployments only), and (5) a Convex " +
+    "anti-pattern lint on convex/*.ts changes (e.g. .filter on a db query, reserved " +
+    "index/table names, Node builtins without \"use node\"). Returns one typed event " +
+    "{ kind: feature_request | refinement_answer | convex_error | next_error | " +
+    "typecheck_error | occ | lint_error | quiet }. Use it as your standing idle action: " +
+    "after the app's first version is up, call this in a loop instead of yielding — each " +
+    "call blocks, so you stay on watch and react the instant something happens (an error " +
+    "to fix, or a user request to build). On a 'convex_error'/'next_error'/" +
+    "'typecheck_error'/'lint_error' stop and fix it; on 'occ' follow the note's playbook; " +
+    "on a request/answer handle it; on 'quiet' (heartbeat timeout) just call again. " +
+    "ALWAYS pass projectDir = the absolute path of the app you scaffolded.";
 
 const TOOL_INPUT_SCHEMA = {
   type: "object",
