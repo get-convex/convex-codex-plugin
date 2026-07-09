@@ -11,7 +11,7 @@ codex plugin marketplace add get-convex/convex-codex-plugin
 codex plugin add convex@convex-codex-plugin
 ```
 
-Then invoke the skills (`quickstart`, `add`, `convex-expert`, `convex-reviewer`, `check-updates`, `quickstart-improve`). The plugin also registers two MCP servers: the official Convex MCP (live-deployment introspection) and an error-watcher.
+Then invoke the skills (`quickstart`, `add`, `convex-expert`, `convex-reviewer`, `check-updates`, `improve-convex-plugin`). The plugin also registers two MCP servers: the official Convex MCP (live-deployment introspection) and an error-watcher.
 
 To update later: `codex plugin marketplace upgrade` then re-run `codex plugin add convex@convex-codex-plugin`.
 
