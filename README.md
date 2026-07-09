@@ -54,8 +54,10 @@ which command triggers it:
 
 ### 1. Anonymous usage telemetry (on by default, opt-out)
 
-Hooks may send anonymous telemetry to Convex's PostHog project: a random device id, the
-plugin version, your OS, and coarse event names (session start, lint/typecheck counts).
+The plugin's bundled MCP server sends anonymous telemetry to Convex's PostHog project
+when a session starts: a random device id, the plugin version, your OS, which agent
+harness emitted the event (always `codex` for this plugin), and whether the workspace
+looks like a Convex project (a yes/no flag — the directory path itself is never sent).
 Never your code, file paths, prompts, or personal identifiers. Opt out with
 `CONVEX_PLUGIN_TELEMETRY=0` or `DO_NOT_TRACK=1`.
 
