@@ -53,7 +53,9 @@ await new Promise((r) => specSrv.listen(0, "127.0.0.1", r));
 const SPEC_URL = `http://127.0.0.1:${specSrv.address().port}/monitors.json`;
 
 const srvErr = [];
-const srv = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CONVEX_MONITOR_SPEC_URL: SPEC_URL } });
+// CONVEX_PLUGIN_TELEMETRY=0 on every spawned server: tests must never send
+// real telemetry (initialize fires plugin_session_start — see analytics.mjs).
+const srv = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CONVEX_MONITOR_SPEC_URL: SPEC_URL, CONVEX_PLUGIN_TELEMETRY: "0" } });
 srv.stderr.on("data", (d) => { srvErr.push(d.toString()); process.stderr.write(d); });
 let buf = "";
 const waiters = new Map();
@@ -119,7 +121,7 @@ try {
     const fb = spawn("node", [SERVER], {
       stdio: ["pipe", "pipe", "pipe"],
       // port 1 is unassigned/refused everywhere — the fetch fails fast
-      env: { ...process.env, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json" },
+      env: { ...process.env, CONVEX_MONITOR_SPEC_URL: "http://127.0.0.1:1/monitors.json", CONVEX_PLUGIN_TELEMETRY: "0" },
     });
     fb.stderr.on("data", (d) => fbErr.push(d.toString()));
     let fbBuf = ""; const fbWaiters = new Map(); let fbId = 1;
@@ -165,7 +167,7 @@ try {
   // spawn one MCP server instance wired for rpc + stderr capture
   const startMcp = (env) => {
     const errChunks = [];
-    const proc = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
+    const proc = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, CONVEX_PLUGIN_TELEMETRY: "0", ...env } });
     proc.stderr.on("data", (d) => errChunks.push(d.toString()));
     let b = ""; const w = new Map(); let id = 1;
     proc.stdout.on("data", (d) => {
