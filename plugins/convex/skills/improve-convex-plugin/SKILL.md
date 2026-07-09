@@ -1,14 +1,14 @@
 ---
-name: quickstart-improve
-description: "Send THIS Codex session's transcript to the Convex quickstart backend for an AI post-mortem that improves the whole system (runbook, bootstrap, skills). TRIGGER when the user runs $quickstart-improve, or after a quickstart build says 'send feedback', 'report how that went', or 'help improve the quickstart'."
-license: Apache-2.0
+name: "improve-convex-plugin"
+description: "Send THIS Codex session's transcript to the Convex quickstart backend for an AI post-mortem that improves the whole system (runbook, bootstrap, skills). TRIGGER when the user runs $improve-convex-plugin, or after a quickstart build says 'send feedback', 'report how that went', or 'help improve the quickstart'."
+license: "Apache-2.0"
 ---
 
-# Send session for review ($quickstart-improve)
+# Send session for review ($improve-convex-plugin)
 
 Ships the current Codex session transcript to anteater's `/review` endpoint, which
 runs an AI post-mortem and returns concrete findings to improve the runbook /
-bootstrap / skills. The user's text after `$quickstart-improve` is an optional note
+bootstrap / skills. The user's text after `$improve-convex-plugin` is an optional note
 about how the run went (pass it as `--idea`).
 
 Run it (QB_HARNESS=codex tells the helper to read the Codex transcript):
