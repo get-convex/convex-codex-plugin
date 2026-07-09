@@ -9,7 +9,9 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 const SERVER = path.join(here, "convex-monitor-mcp.mjs");
 const PROJ = path.join(here, "legtest");
 
-const srv = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "inherit"] });
+// CONVEX_PLUGIN_TELEMETRY=0: the e2e run must never send real telemetry
+// (initialize fires plugin_session_start — see analytics.mjs).
+const srv = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, CONVEX_PLUGIN_TELEMETRY: "0" } });
 let buf = ""; const waiters = new Map(); let nextId = 1;
 srv.stdout.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l.trim()) continue; const m = JSON.parse(l); if (m.id && waiters.has(m.id)) { waiters.get(m.id)(m); waiters.delete(m.id); } } });
 const rpc = (method, params) => new Promise((r) => { const id = nextId++; waiters.set(id, r); srv.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n"); });

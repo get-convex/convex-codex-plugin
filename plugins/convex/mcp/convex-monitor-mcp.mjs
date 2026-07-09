@@ -34,10 +34,12 @@ import { pathToFileURL } from "node:url";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { capture, isConvexProject } from "./analytics.mjs";
+
 const exec = promisify(execCb);
 
 const SERVER_NAME = "convex-plugin";
-const SERVER_VERSION = "0.2.2";
+const SERVER_VERSION = "0.3.0";
 const PROTOCOL_VERSION = "2024-11-05";
 
 const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
@@ -640,12 +642,39 @@ function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
 function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
 function replyErr(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
 
+// ------------------------------------------------------------- telemetry
+// One anonymous `plugin_session_start` per server process, fired on the MCP
+// `initialize` handshake — the moment a Codex session actually wires this
+// plugin up. This is the Codex analog of the Claude plugin's SessionStart
+// hook: same event name, same PostHog project, `harness: "codex"` (stamped
+// by analytics.mjs) tells the surfaces apart. `convex_project` mirrors
+// waitForConvexEvent's project-dir resolution minus the per-call args — only
+// the boolean leaves the machine, never the path. capture() is a no-op when
+// opted out (CONVEX_PLUGIN_TELEMETRY=0 / DO_NOT_TRACK — see analytics.mjs)
+// and never throws or touches stdout, so the handshake cannot be affected.
+let sessionStartTracked = false;
+function trackSessionStart() {
+  if (sessionStartTracked) return;
+  sessionStartTracked = true;
+  const projectDir =
+    process.env.CONVEX_MONITOR_PROJECT_DIR ||
+    process.env.CODEX_WORKSPACE_ROOT ||
+    process.env.PWD ||
+    process.cwd();
+  capture("plugin_session_start", {
+    os: process.platform,
+    node_version: process.version,
+    convex_project: isConvexProject(projectDir),
+  });
+}
+
 async function handle(msg) {
   const { id, method, params } = msg;
   switch (method) {
     case "initialize": {
-      // Bounded by FRESHNESS_TIMEOUT_MS and fail-open, so this never stalls the
-      // handshake. Include the upgrade nudge as MCP instructions when stale.
+      // Emit session-start telemetry (harness=codex), then include the freshness
+      // upgrade nudge as MCP instructions when stale. Bounded + fail-open.
+      trackSessionStart();
       const nudge = await freshnessReady;
       const result = {
         protocolVersion: PROTOCOL_VERSION,
