@@ -37,7 +37,7 @@ import { promisify } from "node:util";
 const exec = promisify(execCb);
 
 const SERVER_NAME = "convex-plugin";
-const SERVER_VERSION = "0.2.1";
+const SERVER_VERSION = "0.2.2";
 const PROTOCOL_VERSION = "2024-11-05";
 
 const log = (...a) => process.stderr.write("[convex-plugin] " + a.join(" ") + "\n");
@@ -56,6 +56,69 @@ const SPEC_URL =
   process.env.CONVEX_MONITOR_SPEC_URL ||
   "https://basic-anteater-667.convex.site/monitors.json";
 const SPEC_FETCH_TIMEOUT_MS = 4000;
+
+// ---- plugin freshness nudge -------------------------------------------------
+// Codex has no SessionStart hook, so the parity mechanism for "your plugin is
+// out of date" is here: on startup we fetch the latest published versions and,
+// if this plugin is behind, surface an upgrade nudge through the MCP `initialize`
+// instructions (injected into the model's context). Fail-open, short timeout,
+// honors the telemetry opt-outs. Keyed "convex-codex" because this plugin's own
+// name ("convex") collides with the public Claude plugin's key.
+const PLUGIN_VERSIONS_URL =
+  process.env.CONVEX_PLUGIN_VERSIONS_URL ||
+  "https://basic-anteater-667.convex.site/plugin-versions.json";
+const FRESHNESS_KEY = "convex-codex";
+const FRESHNESS_TIMEOUT_MS = 1500;
+
+function installedPluginVersion() {
+  try {
+    const url = new URL("../.codex-plugin/plugin.json", import.meta.url);
+    return JSON.parse(fs.readFileSync(url, "utf8")).version || null;
+  } catch {
+    return null;
+  }
+}
+function semverCmp(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+// Resolves to a nudge string if this plugin is behind, else null. Never rejects.
+const freshnessReady = (async () => {
+  if (
+    process.env.DO_NOT_TRACK === "1" ||
+    process.env.CONVEX_PLUGIN_TELEMETRY === "0" ||
+    process.env.CONVEX_PLUGIN_FRESHNESS === "0"
+  )
+    return null;
+  const installed = installedPluginVersion();
+  if (!installed) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), FRESHNESS_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(PLUGIN_VERSIONS_URL, { signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!res.ok) return null;
+    const data = await res.json();
+    const entry = data && data.plugins && data.plugins[FRESHNESS_KEY];
+    if (!entry || !entry.latest) return null;
+    if (semverCmp(installed, entry.latest) >= 0) return null; // current
+    const belowMin = entry.min && semverCmp(installed, entry.min) < 0;
+    return belowMin
+      ? `The installed Convex Codex plugin (v${installed}) is well behind the latest (v${entry.latest}) and below the supported minimum (v${entry.min}). Early in the session, tell the user to update the Convex plugin to the latest version — some features may misbehave until they do.`
+      : `A newer Convex Codex plugin is available (v${entry.latest}; installed v${installed}). At a natural moment, let the user know they can update the Convex plugin. Informational only — do not interrupt their work.`;
+  } catch {
+    return null;
+  }
+})();
 
 // Baked-in fallback config == the server's historical behavior, unchanged.
 const BAKED_CONFIG = {
@@ -580,12 +643,18 @@ function replyErr(id, code, message) { send({ jsonrpc: "2.0", id, error: { code,
 async function handle(msg) {
   const { id, method, params } = msg;
   switch (method) {
-    case "initialize":
-      return reply(id, {
+    case "initialize": {
+      // Bounded by FRESHNESS_TIMEOUT_MS and fail-open, so this never stalls the
+      // handshake. Include the upgrade nudge as MCP instructions when stale.
+      const nudge = await freshnessReady;
+      const result = {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-      });
+      };
+      if (nudge) result.instructions = nudge;
+      return reply(id, result);
+    }
     case "notifications/initialized":
       return; // notification, no response
     case "ping":
