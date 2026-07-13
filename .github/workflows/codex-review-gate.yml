@@ -1,0 +1,38 @@
+name: Codex review gate
+
+# Fails when the plugin's reviewable surface (MCP tools / skills / app
+# capabilities) changed but the recorded review baseline wasn't refreshed — i.e.
+# a change that needs a fresh ChatGPT-app submission is about to ship unreviewed.
+# To go green: submit a new build for review, then run
+#   node scripts/codex-review-gate.mjs --accept
+# and commit plugins/convex/.codex-review.json.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "plugins/convex/skills/**"
+      - "plugins/convex/.mcp.json"
+      - "plugins/convex/mcp/**"
+      - "plugins/convex/.codex-plugin/plugin.json"
+      - "plugins/convex/.codex-review.json"
+      - "scripts/codex-review-gate.mjs"
+  pull_request:
+    paths:
+      - "plugins/convex/skills/**"
+      - "plugins/convex/.mcp.json"
+      - "plugins/convex/mcp/**"
+      - "plugins/convex/.codex-plugin/plugin.json"
+      - "plugins/convex/.codex-review.json"
+      - "scripts/codex-review-gate.mjs"
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check the Codex reviewable surface against the review baseline
+        run: node scripts/codex-review-gate.mjs
