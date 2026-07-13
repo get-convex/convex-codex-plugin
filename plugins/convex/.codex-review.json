@@ -1,0 +1,64 @@
+{
+  "_comment": "Records the Codex reviewable surface last SUBMITTED for ChatGPT app review. Regenerate with `node scripts/codex-review-gate.mjs --accept` after you submit a new build.",
+  "reviewedVersion": "0.6.0",
+  "fingerprint": "c58129a9aaf537fa",
+  "skills": [
+    "add",
+    "agent",
+    "auth",
+    "billing",
+    "check-updates",
+    "convex-authz",
+    "convex-expert",
+    "convex-reviewer",
+    "crons",
+    "domains",
+    "env",
+    "labs-quickstart",
+    "migrate",
+    "quickstart",
+    "quickstart-improve",
+    "seed",
+    "test"
+  ],
+  "mcpServers": {
+    "convex-plugin": {
+      "command": "node",
+      "args": [
+        "mcp/convex-monitor-mcp.mjs"
+      ]
+    },
+    "convex": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "convex@latest",
+        "mcp",
+        "start"
+      ]
+    }
+  },
+  "localMcpTools": [
+    "fix_errors_automatically"
+  ],
+  "app": {
+    "version": "0.6.0",
+    "capabilities": [
+      "Auth-aware data access",
+      "Backend setup",
+      "Database schema",
+      "File storage",
+      "Mobile backends",
+      "Reactive queries",
+      "Realtime apps",
+      "Scaling guidance",
+      "Scheduled jobs",
+      "Server functions"
+    ],
+    "defaultPrompt": [
+      "Add a backend to this app.",
+      "Add real-time data updates.",
+      "Design the database schema."
+    ]
+  }
+}
