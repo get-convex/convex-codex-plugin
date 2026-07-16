@@ -1,48 +1,14 @@
 {
-  "_comment": "Records the Codex reviewable surface last SUBMITTED for ChatGPT app review. Regenerate with `node scripts/codex-review-gate.mjs --accept` after you submit a new build.",
-  "reviewedVersion": "0.6.0",
-  "fingerprint": "c58129a9aaf537fa",
-  "skills": [
-    "add",
-    "agent",
-    "auth",
-    "billing",
-    "check-updates",
-    "convex-authz",
-    "convex-expert",
-    "convex-reviewer",
-    "crons",
-    "domains",
-    "env",
-    "labs-quickstart",
-    "migrate",
-    "quickstart",
-    "quickstart-improve",
-    "seed",
-    "test"
-  ],
-  "mcpServers": {
-    "convex-plugin": {
-      "command": "node",
-      "args": [
-        "mcp/convex-monitor-mcp.mjs"
-      ]
-    },
-    "convex": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "convex@latest",
-        "mcp",
-        "start"
-      ]
-    }
-  },
-  "localMcpTools": [
-    "fix_errors_automatically"
-  ],
+  "_comment": "PUBLISHED reviewable surface — what OpenAI’s curated registry / ChatGPT app ACTUALLY serves to users today (verified 2026-07-16 from the installed openai-curated build, app asdk_app_6a0faef988b48191b843bac5cd170a9e). This is NOT the GitHub HEAD surface. It was mistakenly --accept’d at v0.6.0 once without a real submission, which made the gate green while users kept getting this empty v0.1.2 husk. Only run `--accept` AFTER OpenAI has actually accepted+published a new build.",
+  "publishedVersion": "0.1.2",
+  "publishedAppId": "asdk_app_6a0faef988b48191b843bac5cd170a9e",
+  "reviewedVersion": "0.1.2",
+  "fingerprint": "219e3a4ae19c3dbf",
+  "skills": [],
+  "mcpServers": {},
+  "localMcpTools": [],
   "app": {
-    "version": "0.6.0",
+    "version": "0.1.2",
     "capabilities": [
       "Auth-aware data access",
       "Backend setup",
