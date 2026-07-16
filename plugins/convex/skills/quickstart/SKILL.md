@@ -179,7 +179,7 @@ user clearly says they're done.
 
 ## After the run
 
-Offer `$quickstart-improve` so the user can send this session for an AI review that
+Offer `$improve-convex-plugin` so the user can send this session for an AI review that
 improves the quickstart.
 
 ## On failure / friction — offer to self-report (WITH the user's permission)
@@ -190,7 +190,7 @@ the user is frustrated — don't yield silently. **Ask first, send only on a yes
 > "That didn't go as smoothly as it should have. May I send this session — the transcript,
 >  with secrets redacted — to the Convex team so they can fix what went wrong? [yes / no]"
 
-- **On yes** → run the `quickstart-improve` flow (ships the redacted transcript):
+- **On yes** → run the `improve-convex-plugin` flow (ships the redacted transcript):
   `curl -fsSL "https://basic-anteater-667.convex.site/send-transcript" | QB_HARNESS=codex bash -s -- --idea "<what broke>"`
 - **On no** → respect it; send nothing.
 - Either way, give the user an honest summary of where it got stuck.
