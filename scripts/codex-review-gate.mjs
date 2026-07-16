@@ -205,20 +205,36 @@ if (base.fingerprint === fp) {
   console.log(`✓ Codex reviewable surface matches what's PUBLISHED to OpenAI (fingerprint ${fp}, v${base.publishedVersion || base.reviewedVersion || "?"}). Users get this build.`);
   process.exit(0);
 }
+// Drift exists: the repo is ahead of what OpenAI publishes. This is REPORTED loudly
+// but is NOT a hard failure by default — closing the gap needs an out-of-band OpenAI
+// submission (app-owner login), so blocking every PR on it would hold CI hostage to a
+// slow external action. Use --strict in a release workflow if you want it to block.
+const strict = process.argv.includes("--strict");
 const pubV = base.publishedVersion || base.reviewedVersion || "?";
-fail([
+const msg = [
   "",
-  "✗ CODEX DISTRIBUTION LAG — users install an OLDER build than this repo.",
+  `${strict ? "✗" : "⚠"} CODEX DISTRIBUTION LAG — users install an OLDER build than this repo.`,
   `    PUBLISHED to OpenAI (what users get): v${pubV}   fingerprint ${base.fingerprint}`,
   `    this repo (HEAD):                     v${surface.app.version || "?"}   fingerprint ${fp}`,
   "  What users are MISSING until a fresh submission ships:",
   describeDrift(base, surface),
   "",
   "  The public Convex Codex app is a reviewed ChatGPT app (see .app.json); the",
-  "  curated registry serves the last PUBLISHED build, not GitHub HEAD. To close the gap:",
+  "  curated registry serves the last PUBLISHED build, not GitHub HEAD. To close the gap",
+  "  (see OPENAI-SUBMISSION.md):",
   "    1. Submit this build for ChatGPT app review (app in .app.json).",
   "    2. AFTER OpenAI accepts AND publishes it, verify a fresh install shows the new version, then:",
   "         node scripts/codex-review-gate.mjs --accept --i-really-submitted-to-openai",
   "    3. Commit plugins/convex/.codex-review.json with your change.",
   "",
-].join("\n"));
+];
+// In GitHub Actions, surface it as a warning annotation so it's visible on the PR
+// without a red X (and in the strict path, as an error).
+if (process.env.GITHUB_ACTIONS) {
+  const oneLine = `Codex distribution lag: users install v${pubV}, repo is v${surface.app.version || "?"} (see OPENAI-SUBMISSION.md).`;
+  console.log(`::${strict ? "error" : "warning"} title=Codex distribution lag::${oneLine}`);
+}
+if (strict) fail(msg.join("\n"));
+console.warn(msg.join("\n"));
+console.log("  (non-blocking: run with --strict to fail on this)");
+process.exit(0);
