@@ -4,12 +4,16 @@ A Codex plugin for building on Convex: scaffold a running app from one sentence 
 
 Use this when an app needs a backend: database schema, reactive queries, mutations, server functions, auth-aware data access, real-time features, file storage, scheduled jobs, mobile/web app backends, or production scaling guidance.
 
-## Install (Codex CLI)
+## Install (Codex CLI) — use this, it's the current build
 
 ```bash
 codex plugin marketplace add get-convex/convex-codex-plugin
 codex plugin add convex@convex-codex-plugin
 ```
+
+This installs the full, current plugin (all skills + both MCP servers). Confirm with `codex plugin list` — you want `convex@convex-codex-plugin` at the version in [`plugins/convex/.codex-plugin/plugin.json`](plugins/convex/.codex-plugin/plugin.json).
+
+> **Heads up on the OpenAI-curated listing.** If you install `convex` from OpenAI's curated/ChatGPT-app source instead, you may get an older published snapshot (the curated registry serves the last *submitted* build, not this repo's HEAD — see [OPENAI-SUBMISSION.md](OPENAI-SUBMISSION.md)). The GitHub-marketplace command above always gets the current build. If a curated install ever seems to have no skills or MCP servers, remove it (`codex plugin remove convex@openai-curated`) and use the command above.
 
 Then invoke the skills (`quickstart`, `add`, `convex-expert`, `convex-reviewer`, `check-updates`, `quickstart-improve`). The plugin also registers two MCP servers: the official Convex MCP (live-deployment introspection) and an error-watcher.
 

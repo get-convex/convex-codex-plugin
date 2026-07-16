@@ -153,8 +153,31 @@ if (mode === "print") {
 }
 
 if (mode === "accept") {
+  // Guard against the failure that caused THIS whole mess: someone ran --accept
+  // recording a GitHub surface as "submitted" while OpenAI never published it, so
+  // the gate went green while users kept getting the stale build. Require an
+  // explicit acknowledgement that a real submission actually landed.
+  if (!process.argv.includes("--i-really-submitted-to-openai")) {
+    fail([
+      "",
+      "✗ REFUSING to record a new baseline without proof of an actual OpenAI submission.",
+      `  You're about to mark the surface at v${surface.app.version || "?"} as PUBLISHED.`,
+      "  Only do this AFTER OpenAI has accepted AND published the new ChatGPT-app build",
+      "  (verify: install `convex@openai-curated` fresh and confirm it's the new version).",
+      "",
+      "  Recording an unsubmitted surface is exactly how this gate lied before: a v0.6.0",
+      "  surface was accepted while users kept installing the empty v0.1.2 husk.",
+      "",
+      "  If the build is genuinely live, re-run with the acknowledgement flag:",
+      "    node scripts/codex-review-gate.mjs --accept --i-really-submitted-to-openai",
+      "",
+    ].join("\n"));
+  }
+  const prev = existsSync(BASELINE) ? readJson(BASELINE) : {};
   const record = {
-    _comment: "Records the Codex reviewable surface last SUBMITTED for ChatGPT app review. Regenerate with `node scripts/codex-review-gate.mjs --accept` after you submit a new build.",
+    _comment: "PUBLISHED reviewable surface — what OpenAI’s curated registry / ChatGPT app ACTUALLY serves to users. NOT the GitHub HEAD surface. Only regenerate with `--accept --i-really-submitted-to-openai` AFTER OpenAI has accepted+published a new build.",
+    publishedVersion: surface.app.version,
+    publishedAppId: prev.publishedAppId || "",
     reviewedVersion: surface.app.version,
     fingerprint: fp,
     skills: surface.skills,
@@ -163,7 +186,7 @@ if (mode === "accept") {
     app: surface.app,
   };
   writeFileSync(BASELINE, JSON.stringify(record, null, 2) + "\n");
-  console.log(`✓ recorded reviewed surface (fingerprint ${fp}, version ${surface.app.version || "?"}) → ${BASELINE.replace(ROOT + "/", "")}`);
+  console.log(`✓ recorded PUBLISHED surface (fingerprint ${fp}, version ${surface.app.version || "?"}) → ${BASELINE.replace(ROOT + "/", "")}`);
   process.exit(0);
 }
 
@@ -179,21 +202,39 @@ if (!existsSync(BASELINE)) {
 }
 const base = readJson(BASELINE);
 if (base.fingerprint === fp) {
-  console.log(`✓ Codex reviewable surface unchanged since review (fingerprint ${fp}, reviewed at v${base.reviewedVersion || "?"}). No re-submission needed.`);
+  console.log(`✓ Codex reviewable surface matches what's PUBLISHED to OpenAI (fingerprint ${fp}, v${base.publishedVersion || base.reviewedVersion || "?"}). Users get this build.`);
   process.exit(0);
 }
-fail([
+// Drift exists: the repo is ahead of what OpenAI publishes. This is REPORTED loudly
+// but is NOT a hard failure by default — closing the gap needs an out-of-band OpenAI
+// submission (app-owner login), so blocking every PR on it would hold CI hostage to a
+// slow external action. Use --strict in a release workflow if you want it to block.
+const strict = process.argv.includes("--strict");
+const pubV = base.publishedVersion || base.reviewedVersion || "?";
+const msg = [
   "",
-  "✗ CODEX RE-REVIEW REQUIRED — the reviewable surface changed since the last submission.",
-  `    reviewed fingerprint: ${base.fingerprint} (v${base.reviewedVersion || "?"})`,
-  `    current  fingerprint: ${fp} (v${surface.app.version || "?"})`,
-  "  What changed:",
+  `${strict ? "✗" : "⚠"} CODEX DISTRIBUTION LAG — users install an OLDER build than this repo.`,
+  `    PUBLISHED to OpenAI (what users get): v${pubV}   fingerprint ${base.fingerprint}`,
+  `    this repo (HEAD):                     v${surface.app.version || "?"}   fingerprint ${fp}`,
+  "  What users are MISSING until a fresh submission ships:",
   describeDrift(base, surface),
   "",
-  "  The public Convex Codex app is a reviewed ChatGPT app. Before this ships:",
-  "    1. Submit a new build for ChatGPT app review (see .app.json).",
-  "    2. After it's accepted, record the new surface:",
-  "         node scripts/codex-review-gate.mjs --accept",
+  "  The public Convex Codex app is a reviewed ChatGPT app (see .app.json); the",
+  "  curated registry serves the last PUBLISHED build, not GitHub HEAD. To close the gap",
+  "  (see OPENAI-SUBMISSION.md):",
+  "    1. Submit this build for ChatGPT app review (app in .app.json).",
+  "    2. AFTER OpenAI accepts AND publishes it, verify a fresh install shows the new version, then:",
+  "         node scripts/codex-review-gate.mjs --accept --i-really-submitted-to-openai",
   "    3. Commit plugins/convex/.codex-review.json with your change.",
   "",
-].join("\n"));
+];
+// In GitHub Actions, surface it as a warning annotation so it's visible on the PR
+// without a red X (and in the strict path, as an error).
+if (process.env.GITHUB_ACTIONS) {
+  const oneLine = `Codex distribution lag: users install v${pubV}, repo is v${surface.app.version || "?"} (see OPENAI-SUBMISSION.md).`;
+  console.log(`::${strict ? "error" : "warning"} title=Codex distribution lag::${oneLine}`);
+}
+if (strict) fail(msg.join("\n"));
+console.warn(msg.join("\n"));
+console.log("  (non-blocking: run with --strict to fail on this)");
+process.exit(0);

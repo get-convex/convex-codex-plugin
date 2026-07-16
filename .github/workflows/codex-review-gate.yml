@@ -1,10 +1,13 @@
 name: Codex review gate
 
-# Fails when the plugin's reviewable surface (MCP tools / skills / app
-# capabilities) changed but the recorded review baseline wasn't refreshed — i.e.
-# a change that needs a fresh ChatGPT-app submission is about to ship unreviewed.
-# To go green: submit a new build for review, then run
-#   node scripts/codex-review-gate.mjs --accept
+# Reports (as a WARNING annotation, non-blocking) when the plugin's reviewable
+# surface (MCP tools / skills / app capabilities) is ahead of what OpenAI actually
+# publishes to users — i.e. there's a distribution lag that needs a fresh
+# ChatGPT-app submission (see OPENAI-SUBMISSION.md). It does not fail the build,
+# because closing that gap is an out-of-band OpenAI submission (app-owner login),
+# not something a repo merge can do. To clear the warning: submit a new build,
+# and once OpenAI publishes it run
+#   node scripts/codex-review-gate.mjs --accept --i-really-submitted-to-openai
 # and commit plugins/convex/.codex-review.json.
 
 on:
@@ -34,5 +37,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Check the Codex reviewable surface against the review baseline
-        run: node scripts/codex-review-gate.mjs
+      - name: Check the Codex reviewable surface against the published baseline
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/codex-review-gate.mjs 2>&1 | tee gate-out.txt
+          {
+            echo '```';
+            cat gate-out.txt;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
