@@ -41,18 +41,29 @@ declared surface. If OpenAI's process still requires a review pass for a payload
 this much larger, so be it — but the *app interface* reviewers signed off on has
 not moved.
 
+## Pre-submission checklist (verified 2026-07-17, build v0.7.2)
+
+The build is ready — these were checked on `main`:
+
+- [x] Payload `plugins/convex/` is at **v0.7.2**, self-contained (skills + `.mcp.json` + `.codex-plugin/plugin.json` + `.app.json`).
+- [x] **17 skills + 2 MCP servers** present; installs clean in an isolated `CODEX_HOME` (`codex plugin add convex@convex-codex-plugin` → root `.../convex/0.7.2`).
+- [x] **Zero staging leaks** — no `graceful-tiger-715` (staging) or beta refs in the payload; the review flow points at prod `basic-anteater-667`.
+- [x] **Root app-card version aligned** to 0.7.2 (was a stale 0.4.9) so the app listing and payload agree.
+
 ## What to submit
 
 1. **The current build of `plugins/convex/`** from `get-convex/convex-codex-plugin`
-   at the version in `plugins/convex/.codex-plugin/plugin.json`. That directory is
-   self-contained (skills + `.mcp.json` + `.codex-plugin/plugin.json` + `.app.json`).
-2. Against app **`asdk_app_6a0faef988b48191b843bac5cd170a9e`** (the account that
-   owns this app must drive the submission — it needs the OpenAI app-developer
-   login; it cannot be done from the CLI, which has only `add`/`list`/`marketplace`).
-3. **Reviewer note:** "Payload refresh only. The declared app interface
-   (capabilities, defaultPrompt, websiteURL) is unchanged from the currently-live
-   v0.1.2. This adds the plugin's skills and two MCP servers (one official Convex
-   MCP, one local error-watcher). No new declared capabilities."
+   at **v0.7.2** (`main`). Self-contained; nothing else needs to be assembled.
+2. Against app **`asdk_app_6a0faef988b48191b843bac5cd170a9e`** — the account that
+   owns this app drives the submission via the OpenAI Apps developer console (it
+   cannot be done from the `codex` CLI, which has only `add`/`list`/`marketplace`;
+   there is no `codex publish`).
+3. **Reviewer note (paste verbatim):** "Payload refresh only. The declared app
+   interface (capabilities, defaultPrompt, websiteURL) is unchanged from the
+   currently-live v0.1.2. This adds the plugin's 17 skills and two MCP servers (one
+   official Convex MCP `npx convex mcp start`, one local Node error-watcher exposing
+   `fix_errors_automatically`). No new declared capabilities; no change to the app
+   card copy."
 
 ## Two possible channels (confirm which one OpenAI uses for this app)
 
