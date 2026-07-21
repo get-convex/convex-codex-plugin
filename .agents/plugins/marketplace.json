@@ -1,7 +1,20 @@
 {
   "name": "convex-codex-plugin",
-  "interface": { "displayName": "Convex (Codex)" },
+  "interface": {
+    "displayName": "Convex (Codex)"
+  },
   "plugins": [
-    { "name": "convex", "source": { "source": "local", "path": "./plugins/convex" }, "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" }, "category": "Engineering" }
+    {
+      "name": "convex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/convex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Engineering"
+    }
   ]
 }
