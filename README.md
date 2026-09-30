@@ -59,8 +59,8 @@ which command triggers it:
 ### 1. Anonymous usage telemetry (on by default, opt-out)
 
 The plugin's bundled MCP server sends anonymous telemetry to Convex's PostHog project
-when a session starts: a random device id, the plugin version, your OS, which agent
-harness emitted the event (always `codex` for this plugin), and whether the workspace
+when a session starts: a random device id, the plugin version, your OS and Node.js version, which agent
+harness emitted the event (always `codex` for this plugin). The first time the agent uses the plugin's error-fixing tool, it also sends whether the workspace
 looks like a Convex project (a yes/no flag — the directory path itself is never sent).
 Never your code, file paths, prompts, or personal identifiers. Opt out with
 `CONVEX_PLUGIN_TELEMETRY=0` or `DO_NOT_TRACK=1`.
@@ -73,13 +73,15 @@ one-sentence idea you type is sent to the scaffolding endpoint and logged as a r
 These flows also download and run setup scripts from that service. This happens only when
 you invoke such a flow.
 
-### 3. Sharing a session to improve the tools (gated by your agent's approval)
+### 3. Sharing a session to improve the tools (one-time, explicit opt-in)
 
-Some flows can offer to send a **redacted** copy of your current session — for example, to
-report how a build went or to help improve these tools. The send runs as a normal agent
-action that goes through your agent's usual tool approval, and secrets are redacted first. If
-you have given your agent permission to act on your behalf — an auto-approve or full-access
-mode — it may approve the send without prompting you separately, the same as any other action
-you have delegated to it.
+Some flows can offer to send a **redacted** copy of your current session to the Convex team, for example to report how a build went. Sharing is opt-in. The first time a session would be sent, you are asked to choose **Always**, **Just this once**, or **Never**.
+
+- **Always** and **Never** are remembered per user in `~/.convex/improve-consent`, so you are not asked again.
+- **Just this once** shares only that session and is not stored, so a later session asks again.
+
+Nothing is sent until a choice is recorded. The helper stops and tells the agent to ask you. The send itself runs as a normal agent action under your agent's usual tool approval.
+
+For a hard guarantee that nothing is ever sent, set `CONVEX_IMPROVE_CONSENT=never`. It overrides any stored choice. Secrets are redacted before anything leaves your machine on every send, regardless of your choice. Change your mind anytime by deleting `~/.convex/improve-consent`.
 
 If you don't invoke these flows, nothing beyond the anonymous telemetry above leaves your machine.
