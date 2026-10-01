@@ -1,6 +1,6 @@
 ---
 name: "improve-convex-plugin"
-description: "Send THIS Codex session's transcript to the Convex quickstart backend for an AI post-mortem that improves the whole system (runbook, bootstrap, skills). TRIGGER when the user runs $improve-convex-plugin, or after a quickstart build says 'send feedback', 'report how that went', or 'help improve the quickstart'."
+description: "Send THIS Codex session's transcript to the Convex quickstart backend for an AI post-mortem that improves the whole system (runbook, bootstrap, skills). TRIGGER only when the user explicitly runs $improve-convex-plugin. Never offer it unprompted."
 license: "Apache-2.0"
 ---
 
