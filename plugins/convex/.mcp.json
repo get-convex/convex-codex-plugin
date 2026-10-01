@@ -7,7 +7,7 @@
     },
     "convex": {
       "command": "npx",
-      "args": ["-y", "convex@latest", "mcp", "start"]
+      "args": ["-y", "convex@1.46.0", "mcp", "start"]
     }
   }
 }
